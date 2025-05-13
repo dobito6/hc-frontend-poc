@@ -9,9 +9,6 @@ import PackageDescription
 
 let package = Package(
   name: "Hylo",
-  platforms: [
-    .macOS(.v13)
-  ],
   products: [
     .executable(name: "hc", targets: ["hc"])
   ],
