@@ -2,16 +2,18 @@ import Archivist
 
 /// A function in the `Builtin` module.
 ///
-/// Built-in functions implement the basis operations on built-in types such as `Builtin.i64`, and
+/// Built-in functions implement the basis operations on machine types such as `Builtin.i64`, and
 /// are implemented by a single IR instruction.
 ///
 /// Only a few built-in functions, such as `Builtin.address(of:)`, are truly generic. Others are
-/// parameterized by a bounded selection of types and flags, resulting in a family of related
-/// *non-generic* Hylo functions having the same base name. The full name of these functions is a
-/// concatenation of the base name with a representation of the value of each parameter, separated
-/// by underscores. For example, `Builtin.add_i32` and `Builtin.add_i64` represent integer addition
-/// for 32-bit and 64-bit integer values. Some flags have default values
-/// (e.g. `OverflowBehavior.ignored`), which are omitted from builtin function names.  For example:
+/// parameterized by a bounded selection of types and flags, resulting in a family *non-generic*
+/// Hylo functions having the same base name. The full name of these functions is a concatenation
+/// of the base name with the value of each parameter separated by underscores. For example,
+/// `Builtin.add_i32` and `Builtin.add_i64` denote integer addition for 32-bit and 64-bit machine
+/// integer values, respectively.
+///
+/// Some flags have default values (e.g., `OverflowBehavior.ignored`), which are omitted from
+/// builtin function names. For example:
 ///
 /// | Hylo spelling               | Swift representation     |
 /// |:----------------------------|:-------------------------|
@@ -19,8 +21,8 @@ import Archivist
 /// | `Builtin.icmp_ne_i32`       | `.icmp(.ne, .i(32))`     |
 /// | `Builtin.fmul_fast_float64` | `.fmul(.fast, .float64)` |
 ///
-/// Most built-in functions have the same semantics an the LLVM instruction with the same base name;
-/// the other cases have documentation describing their semantics and Hylo signature.  Supported
+/// Most built-in functions have the same semantics as the LLVM instruction having the same base
+/// name. Other cases have documentation describing their semantics and Hylo signature. Supported
 /// LLVM operations include all arithmetic and comparison instructions on built-in integral and
 /// floating-point numbers as well as conversions from and to these types.
 @Archivable
@@ -41,14 +43,14 @@ public enum BuiltinFunction: Hashable, Sendable {
   /// Marks `v` as being uninitialized.
   case markUninitialized
 
-//  // MARK: Functions with a counterpart LLVM instruction.
-//
-//  case add(OverflowBehavior, MachineType.ID)
-//
-//  case sub(OverflowBehavior, MachineType.ID)
-//
-//  case mul(OverflowBehavior, MachineType.ID)
-//
+  // MARK: Functions with a counterpart LLVM instruction.
+
+  case add(OverflowBehavior, MachineType.ID)
+
+  case sub(OverflowBehavior, MachineType.ID)
+
+  case mul(OverflowBehavior, MachineType.ID)
+
 //  case shl(OverflowBehavior, MachineType.ID)
 //
 //  case udiv(exact: Bool, MachineType.ID)
@@ -62,33 +64,33 @@ public enum BuiltinFunction: Hashable, Sendable {
 //  case urem(MachineType.ID)
 //
 //  case srem(MachineType.ID)
-//
-//  case and(MachineType.ID)
-//
-//  case or(MachineType.ID)
-//
-//  case xor(MachineType.ID)
-//
-//  // Corresponding LLVM instruction: sadd.with.overflow
-//  case signedAdditionWithOverflow(MachineType.ID)
-//
-//  // Corresponding LLVM instruction: uadd.with.overflow
-//  case unsignedAdditionWithOverflow(MachineType.ID)
-//
-//  // Corresponding LLVM instruction: ssub.with.overflow
-//  case signedSubtractionWithOverflow(MachineType.ID)
-//
-//  // Corresponding LLVM instruction: usub.with.overflow
-//  case unsignedSubtractionWithOverflow(MachineType.ID)
-//
-//  // Corresponding LLVM instruction: smul.with.overflow
-//  case signedMultiplicationWithOverflow(MachineType.ID)
-//
-//  // Corresponding LLVM instruction: umul.with.overflow
-//  case unsignedMultiplicationWithOverflow(MachineType.ID)
-//
-//  case icmp(IntegerPredicate, MachineType.ID)
-//
+
+  case and(MachineType.ID)
+
+  case or(MachineType.ID)
+
+  case xor(MachineType.ID)
+
+  /// In LLVM: `sadd.with.overflow`
+  case signedAdditionWithOverflow(MachineType.ID)
+
+  /// In LLVM: `uadd.with.overflow`
+  case unsignedAdditionWithOverflow(MachineType.ID)
+
+  /// In LLVM: `ssub.with.overflow`
+  case signedSubtractionWithOverflow(MachineType.ID)
+
+  /// In LLVM: `usub.with.overflow`
+  case unsignedSubtractionWithOverflow(MachineType.ID)
+
+  /// In LLVM: `smul.with.overflow`
+  case signedMultiplicationWithOverflow(MachineType.ID)
+
+  /// In LLVM: `umul.with.overflow`
+  case unsignedMultiplicationWithOverflow(MachineType.ID)
+
+  case icmp(IntegerPredicate, MachineType.ID)
+
 //  case trunc(MachineType.ID, MachineType.ID)
 //
 //  case zext(MachineType.ID, MachineType.ID)
@@ -387,6 +389,8 @@ extension BuiltinFunction {
 
   /// Returns the type of the function, calling `freshVariable` to create fresh type variables.
   public func type(uniquingTypesWith s: inout TypeStore) -> Arrow.ID {
+    let i1 = s.demand(MachineType.i(1))
+
     switch self {
     case .addressOf:
       let t0 = s.fresh().erased
@@ -398,12 +402,12 @@ extension BuiltinFunction {
       let t0 = s.fresh().erased
       return s.demand(Arrow(inputs: [.init(label: nil, access: .sink, type: t0)], output: .void))
 
-//    case .add(_, let t):
-//      return .init(^t, ^t, to: ^t)
-//    case .sub(_, let t):
-//      return .init(^t, ^t, to: ^t)
-//    case .mul(_, let t):
-//      return .init(^t, ^t, to: ^t)
+    case .add(_, let t):
+      return s.demand(Arrow(t, t, to: t))
+    case .sub(_, let t):
+      return s.demand(Arrow(t, t, to: t))
+    case .mul(_, let t):
+      return s.demand(Arrow(t, t, to: t))
 //    case .shl(_, let t):
 //      return .init(^t, ^t, to: ^t)
 //    case .udiv(_, let t):
@@ -418,26 +422,32 @@ extension BuiltinFunction {
 //      return .init(^t, ^t, to: ^t)
 //    case .srem(let t):
 //      return .init(^t, ^t, to: ^t)
-//    case .and(let t):
-//      return .init(^t, ^t, to: ^t)
-//    case .or(let t):
-//      return .init(^t, ^t, to: ^t)
-//    case .xor(let t):
-//      return .init(^t, ^t, to: ^t)
-//    case .signedAdditionWithOverflow(let t):
-//      return .init(^t, ^t, to: ^TupleType(types: [^t, .builtin(.i(1))]))
-//    case .unsignedAdditionWithOverflow(let t):
-//      return .init(^t, ^t, to: ^TupleType(types: [^t, .builtin(.i(1))]))
-//    case .signedSubtractionWithOverflow(let t):
-//      return .init(^t, ^t, to: ^TupleType(types: [^t, .builtin(.i(1))]))
-//    case .unsignedSubtractionWithOverflow(let t):
-//      return .init(^t, ^t, to: ^TupleType(types: [^t, .builtin(.i(1))]))
-//    case .signedMultiplicationWithOverflow(let t):
-//      return .init(^t, ^t, to: ^TupleType(types: [^t, .builtin(.i(1))]))
-//    case .unsignedMultiplicationWithOverflow(let t):
-//      return .init(^t, ^t, to: ^TupleType(types: [^t, .builtin(.i(1))]))
-//    case .icmp(_, let t):
-//      return .init(^t, ^t, to: .builtin(.i(1)))
+    case .and(let t):
+      return s.demand(Arrow(t, t, to: t))
+    case .or(let t):
+      return s.demand(Arrow(t, t, to: t))
+    case .xor(let t):
+      return s.demand(Arrow(t, t, to: t))
+    case .signedAdditionWithOverflow(let t):
+      let u = s.demand(Tuple(types: [t.erased, i1.erased]))
+      return s.demand(Arrow(t, t, to: u))
+    case .unsignedAdditionWithOverflow(let t):
+      let u = s.demand(Tuple(types: [t.erased, i1.erased]))
+      return s.demand(Arrow(t, t, to: u))
+    case .signedSubtractionWithOverflow(let t):
+      let u = s.demand(Tuple(types: [t.erased, i1.erased]))
+      return s.demand(Arrow(t, t, to: u))
+    case .unsignedSubtractionWithOverflow(let t):
+      let u = s.demand(Tuple(types: [t.erased, i1.erased]))
+      return s.demand(Arrow(t, t, to: u))
+    case .signedMultiplicationWithOverflow(let t):
+      let u = s.demand(Tuple(types: [t.erased, i1.erased]))
+      return s.demand(Arrow(t, t, to: u))
+    case .unsignedMultiplicationWithOverflow(let t):
+      let u = s.demand(Tuple(types: [t.erased, i1.erased]))
+      return s.demand(Arrow(t, t, to: u))
+    case .icmp(_, let t):
+      return s.demand(Arrow(t, t, to: i1))
 //    case .trunc(let s, let d):
 //      return .init(^s, to: ^d)
 //    case .zext(let s, let d):
@@ -725,22 +735,21 @@ extension BuiltinFunction {
 
 }
 
-//extension BuiltinFunction: CustomStringConvertible {
-//
-//  /// The part of the name of this function in the `Builtin` module that comes before the
-//  /// parentheses.
-//  public var description: String {
-//    switch self {
-//    case .addressOf:
-//      return "address"
-//    case .markUninitialized:
-//      return "mark_uninitialized"
-//    case .add(let p, let t):
-//      return (p != .ignore) ? "add_\(p)_\(t)" : "add_\(t)"
-//    case .sub(let p, let t):
-//      return (p != .ignore) ? "sub_\(p)_\(t)" : "sub_\(t)"
-//    case .mul(let p, let t):
-//      return (p != .ignore) ? "mul_\(p)_\(t)" : "mul_\(t)"
+extension BuiltinFunction: Showable {
+
+  /// Returns the part of the name of this function that comes before the parentheses.
+  public func show(using printer: inout TreePrinter) -> String {
+    switch self {
+    case .addressOf:
+      return "address"
+    case .markUninitialized:
+      return "mark_uninitialized"
+    case .add(let p, let t):
+      return printer.format((p != .ignore) ? "add_\(p)_%T" : "add_%T", [t.erased])
+    case .sub(let p, let t):
+      return printer.format((p != .ignore) ? "sub_\(p)_%T" : "sub_%T", [t.erased])
+    case .mul(let p, let t):
+      return printer.format((p != .ignore) ? "mul_\(p)_%T" : "mul_%T", [t.erased])
 //    case .shl(let p, let t):
 //      return (p != .ignore) ? "shl_\(p)_\(t)" : "shl_\(t)"
 //    case .udiv(let e, let t):
@@ -755,26 +764,26 @@ extension BuiltinFunction {
 //      return "urem_\(t)"
 //    case .srem(let t):
 //      return "srem_\(t)"
-//    case .and(let t):
-//      return "and_\(t)"
-//    case .or(let t):
-//      return "or_\(t)"
-//    case .xor(let t):
-//      return "xor_\(t)"
-//    case .signedAdditionWithOverflow(let t):
-//      return "sadd_with_overflow_\(t)"
-//    case .unsignedAdditionWithOverflow(let t):
-//      return "uadd_with_overflow_\(t)"
-//    case .signedSubtractionWithOverflow(let t):
-//      return "ssub_with_overflow_\(t)"
-//    case .unsignedSubtractionWithOverflow(let t):
-//      return "usub_with_overflow_\(t)"
-//    case .signedMultiplicationWithOverflow(let t):
-//      return "smul_with_overflow_\(t)"
-//    case .unsignedMultiplicationWithOverflow(let t):
-//      return "umul_with_overflow_\(t)"
-//    case .icmp(let p, let t):
-//      return "icmp_\(p)_\(t)"
+    case .and(let t):
+      return printer.format("and_%T", [t.erased])
+    case .or(let t):
+      return printer.format("or_%T", [t.erased])
+    case .xor(let t):
+      return printer.format("xor_%T", [t.erased])
+    case .signedAdditionWithOverflow(let t):
+      return printer.format("sadd_with_overflow_%T", [t.erased])
+    case .unsignedAdditionWithOverflow(let t):
+      return printer.format("uadd_with_overflow_%T", [t.erased])
+    case .signedSubtractionWithOverflow(let t):
+      return printer.format("ssub_with_overflow_%T", [t.erased])
+    case .unsignedSubtractionWithOverflow(let t):
+      return printer.format("usub_with_overflow_%T", [t.erased])
+    case .signedMultiplicationWithOverflow(let t):
+      return printer.format("smul_with_overflow_%T", [t.erased])
+    case .unsignedMultiplicationWithOverflow(let t):
+      return printer.format("umul_with_overflow_%T", [t.erased])
+    case .icmp(let p, let t):
+      return printer.format("icmp_\(p)_%T", [t.erased])
 //    case .trunc(let l, let r):
 //      return "trunc_\(l)_\(r)"
 //    case .zext(let l, let r):
@@ -815,8 +824,8 @@ extension BuiltinFunction {
 //      return "ctlz_\(t)"
 //    case .cttz(let t):
 //      return "cttz_\(t)"
-//    case .zeroinitializer(let t):
-//      return "zeroinitializer_\(t)"
+    case .zeroinitializer(let t):
+      return printer.format("zeroinitializer_%T", [t.erased])
 //    case .advancedByBytes(let t):
 //      return "advanced_by_bytes_\(t)"
 //    case .atomic_store_relaxed(let t):
@@ -1057,10 +1066,10 @@ extension BuiltinFunction {
 //      return "atomic_singlethreadfence_acqrel"
 //    case .atomic_singlethreadfence_seqcst:
 //      return "atomic_singlethreadfence_seqcst"
-//    }
-//  }
-//
-//}
+    }
+  }
+
+}
 
 // MARK: Parsing
 
@@ -1077,28 +1086,25 @@ extension BuiltinFunction {
     case "address":
       if !tokens.isEmpty { return nil }
       self = .addressOf
-
     case "mark":
       if tokens != ["uninitialized"] { return nil }
       self = .markUninitialized
-//
+
 //    case "advanced":
 //      guard let ((_, _), t) = (exactly("by") ++ exactly("bytes") ++ machineType)(&tokens)
 //      else { return nil }
 //      self = .advancedByBytes(byteOffset: t)
-//
-//    case "add":
-//      guard let (p, t) = integerArithmeticTail(&tokens) else { return nil }
-//      self = .add(p, t)
-//
-//    case "sub":
-//      guard let (p, t) = integerArithmeticTail(&tokens) else { return nil }
-//      self = .sub(p, t)
-//
-//    case "mul":
-//      guard let (p, t) = integerArithmeticTail(&tokens) else { return nil }
-//      self = .mul(p, t)
-//
+
+    case "add":
+      guard let (p, t) = integerArithmeticTail(&tokens) else { return nil }
+      self = .add(p, s.demand(t))
+    case "sub":
+      guard let (p, t) = integerArithmeticTail(&tokens) else { return nil }
+      self = .sub(p, s.demand(t))
+    case "mul":
+      guard let (p, t) = integerArithmeticTail(&tokens) else { return nil }
+      self = .mul(p, s.demand(t))
+
 //    case "shl":
 //      guard let (p, t) = integerArithmeticTail(&tokens) else { return nil }
 //      self = .shl(p, t)
@@ -1126,47 +1132,38 @@ extension BuiltinFunction {
 //    case "srem":
 //      guard let t = machineType(&tokens) else { return nil }
 //      self = .srem(t)
-//
-//    case "and":
-//      guard let t = machineType(&tokens) else { return nil }
-//      self = .and(t)
-//
-//    case "or":
-//      guard let t = machineType(&tokens) else { return nil }
-//      self = .or(t)
-//
-//    case "xor":
-//      guard let t = machineType(&tokens) else { return nil }
-//      self = .xor(t)
-//
-//    case "sadd":
-//      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
-//      self = .signedAdditionWithOverflow(t)
-//
-//    case "uadd":
-//      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
-//      self = .unsignedAdditionWithOverflow(t)
-//
-//    case "ssub":
-//      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
-//      self = .signedSubtractionWithOverflow(t)
-//
-//    case "usub":
-//      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
-//      self = .unsignedSubtractionWithOverflow(t)
-//
-//    case "smul":
-//      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
-//      self = .signedMultiplicationWithOverflow(t)
-//
-//    case "umul":
-//      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
-//      self = .unsignedMultiplicationWithOverflow(t)
-//
-//    case "icmp":
-//      guard let (p, t) = integerComparisonTail(&tokens) else { return nil }
-//      self = .icmp(p, t)
-//
+
+    case "and":
+      guard let t = machineType(&tokens) else { return nil }
+      self = .and(s.demand(t))
+    case "or":
+      guard let t = machineType(&tokens) else { return nil }
+      self = .or(s.demand(t))
+    case "xor":
+      guard let t = machineType(&tokens) else { return nil }
+      self = .xor(s.demand(t))
+    case "sadd":
+      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
+      self = .signedAdditionWithOverflow(s.demand(t))
+    case "uadd":
+      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
+      self = .unsignedAdditionWithOverflow(s.demand(t))
+    case "ssub":
+      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
+      self = .signedSubtractionWithOverflow(s.demand(t))
+    case "usub":
+      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
+      self = .unsignedSubtractionWithOverflow(s.demand(t))
+    case "smul":
+      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
+      self = .signedMultiplicationWithOverflow(s.demand(t))
+    case "umul":
+      guard let t = integerArithmeticWithOverflowTail(&tokens) else { return nil }
+      self = .unsignedMultiplicationWithOverflow(s.demand(t))
+    case "icmp":
+      guard let (p, t) = integerComparisonTail(&tokens) else { return nil }
+      self = .icmp(p, s.demand(t))
+
 //    case "trunc":
 //      guard let (s, d) = (machineType ++ machineType)(&tokens) else { return nil }
 //      self = .trunc(s, d)
@@ -1555,7 +1552,7 @@ private func + <A, B>(
   _ a: @escaping BuiltinFunctionParser<A>, _ b: @escaping BuiltinFunctionParser<B>
 ) -> BuiltinFunctionParser<(A, B)> {
   { (stream: inout ArraySlice<Substring>) -> (A, B)? in
-    a(&stream).flatMap({ (x) in b(&stream).map({ (x, $0) }) })
+    a(&stream).flatMap({ (x) in b(&stream).map({ (y) in (x, y) }) })
   }
 }
 
@@ -1565,7 +1562,7 @@ private func take<T: RawRepresentable>(
   _: T.Type
 ) -> BuiltinFunctionParser<T> where T.RawValue == String {
   { (stream: inout ArraySlice<Substring>) -> T? in
-    stream.popFirst().flatMap({ T(rawValue: .init($0)) })
+    stream.popFirst().flatMap({ (x) in T(rawValue: .init(x)) })
   }
 }
 

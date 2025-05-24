@@ -1,0 +1,17 @@
+//! no-std
+
+@  blah
+fun f() {}
+
+struct A {
+  @blah let x: Void
+  @blah typealias T = Void
+}
+
+trait P {
+  @blah type X
+}
+
+@blah extension Void {}
+
+@blah given Void is P {}

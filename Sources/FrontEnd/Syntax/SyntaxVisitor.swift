@@ -92,10 +92,14 @@ extension Program {
       traverse(castUnchecked(n, to: Conversion.self), calling: &v)
     case EqualityWitnessExpression.self:
       traverse(castUnchecked(n, to: EqualityWitnessExpression.self), calling: &v)
+    case If.self:
+      traverse(castUnchecked(n, to: If.self), calling: &v)
     case ImplicitQualification.self:
       break
     case InoutExpression.self:
       traverse(castUnchecked(n, to: InoutExpression.self), calling: &v)
+    case IntegerLiteral.self:
+      break
     case KindExpression.self:
       traverse(castUnchecked(n, to: KindExpression.self), calling: &v)
     case NameExpression.self:
@@ -110,6 +114,8 @@ extension Program {
       traverse(castUnchecked(n, to: RemoteTypeExpression.self), calling: &v)
     case StaticCall.self:
       traverse(castUnchecked(n, to: StaticCall.self), calling: &v)
+    case StringLiteral.self:
+      break
     case SumTypeExpression.self:
       traverse(castUnchecked(n, to: SumTypeExpression.self), calling: &v)
     case SynthethicExpression.self:
@@ -130,6 +136,8 @@ extension Program {
 
     case Assignment.self:
       traverse(castUnchecked(n, to: Assignment.self), calling: &v)
+    case Block.self:
+      traverse(castUnchecked(n, to: Block.self), calling: &v)
     case Discard.self:
       traverse(castUnchecked(n, to: Discard.self), calling: &v)
     case Return.self:
@@ -174,7 +182,7 @@ extension Program {
   public func traverse<T: SyntaxVisitor>(_ n: ConformanceDeclaration.ID, calling v: inout T) {
     visit(self[n].staticParameters, calling: &v)
     visit(self[n].witness, calling: &v)
-    visit(self[n].members, calling: &v)
+    if let b = self[n].members { visit(b, calling: &v) }
   }
 
   /// Visits the children of `n` in pre-order, calling back `v` when a node is entered or left.
@@ -187,7 +195,7 @@ extension Program {
   public func traverse<T: SyntaxVisitor>(_ n: EnumDeclaration.ID, calling v: inout T) {
     visit(self[n].staticParameters, calling: &v)
     visit(self[n].representation, calling: &v)
-    visit(self[n].contextBounds, calling: &v)
+    visit(self[n].conformances, calling: &v)
     visit(self[n].members, calling: &v)
   }
 
@@ -228,7 +236,7 @@ extension Program {
   /// Visits the children of `n` in pre-order, calling back `v` when a node is entered or left.
   public func traverse<T: SyntaxVisitor>(_ n: StructDeclaration.ID, calling v: inout T) {
     visit(self[n].staticParameters, calling: &v)
-    visit(self[n].contextBounds, calling: &v)
+    visit(self[n].conformances, calling: &v)
     visit(self[n].members, calling: &v)
   }
 
@@ -270,6 +278,13 @@ extension Program {
   public func traverse<T: SyntaxVisitor>(_ n: EqualityWitnessExpression.ID, calling v: inout T) {
     visit(self[n].lhs, calling: &v)
     visit(self[n].rhs, calling: &v)
+  }
+
+  /// Visits the children of `n` in pre-order, calling back `v` when a node is entered or left.
+  public func traverse<T: SyntaxVisitor>(_ n: If.ID, calling v: inout T) {
+    visit(self[n].conditions, calling: &v)
+    visit(self[n].success, calling: &v)
+    visit(self[n].failure, calling: &v)
   }
 
   /// Visits the children of `n` in pre-order, calling back `v` when a node is entered or left.
@@ -361,6 +376,11 @@ extension Program {
   public func traverse<T: SyntaxVisitor>(_ n: Assignment.ID, calling v: inout T) {
     visit(self[n].lhs, calling: &v)
     visit(self[n].rhs, calling: &v)
+  }
+
+  /// Visits the children of `n` in pre-order, calling back `v` when a node is entered or left.
+  public func traverse<T: SyntaxVisitor>(_ n: Block.ID, calling v: inout T) {
+    visit(self[n].statements, calling: &v)
   }
 
   /// Visits the children of `n` in pre-order, calling back `v` when a node is entered or left.

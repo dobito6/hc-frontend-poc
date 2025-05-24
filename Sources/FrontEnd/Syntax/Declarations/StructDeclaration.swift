@@ -2,7 +2,10 @@ import Archivist
 
 /// The declaration of a structure.
 @Archivable
-public struct StructDeclaration: TypeDeclaration, ModifiableDeclaration, Scope {
+public struct StructDeclaration: TypeDeclaration, ModifiableDeclaration, Annotatable, Scope {
+
+  /// The annotations on this declaration.
+  public let annotations: [Annotation]
 
   /// The modifiers applied to this declaration.
   public let modifiers: [Parsed<DeclarationModifier>]
@@ -17,7 +20,7 @@ public struct StructDeclaration: TypeDeclaration, ModifiableDeclaration, Scope {
   public let staticParameters: StaticParameters
 
   /// The conformances declared along with the struct.
-  public let contextBounds: [ConformanceDeclaration.ID]
+  public let conformances: [ConformanceDeclaration.ID]
 
   /// The members of the declared struct.
   public let members: [DeclarationIdentity]
@@ -27,19 +30,21 @@ public struct StructDeclaration: TypeDeclaration, ModifiableDeclaration, Scope {
 
   /// Creates an instance with the given properties.
   public init(
+    annotations: [Annotation],
     modifiers: [Parsed<DeclarationModifier>],
     introducer: Token,
     identifier: Parsed<String>,
     staticParameters: StaticParameters,
-    contextBounds: [ConformanceDeclaration.ID],
+    conformances: [ConformanceDeclaration.ID],
     members: [DeclarationIdentity],
     site: SourceSpan
   ) {
+    self.annotations = annotations
     self.modifiers = modifiers
     self.introducer = introducer
     self.identifier = identifier
     self.staticParameters = staticParameters
-    self.contextBounds = contextBounds
+    self.conformances = conformances
     self.members = members
     self.site = site
   }
@@ -58,8 +63,8 @@ extension StructDeclaration: Showable {
       result.append(printer.show(staticParameters))
     }
 
-    if !contextBounds.isEmpty {
-      result.append(": \(printer.showAsContextBounds(contextBounds))")
+    if !conformances.isEmpty {
+      result.append(" is \(printer.showAdjunct(conformances))")
     }
 
     result.append(" {\n")

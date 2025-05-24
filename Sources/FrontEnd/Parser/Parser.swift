@@ -9,28 +9,25 @@ public struct Parser {
     /// The default context.
     case `default`
 
+    /// The parsing of member declarations.
+    case typeBody
+
     /// The parsing of the subpattern of binding pattern.
     case bindingSubpattern
-
-    /// The body of an enum declaration.
-    case enumBody
-
-    /// The body of an enum declaration.
-    case structBody
 
   }
 
   /// The tokens in the input.
   private var tokens: Lexer
 
+  /// The position immediately after the last consumed token.
+  private var position: SourcePosition
+
   /// The next token to consume, if already extracted from the source.
   private var lookahead: Token? = nil
 
   /// The errors that have been collected so far.
   private var errors: [ParseError] = []
-
-  /// The position immediately after the last consumed token.
-  private var position: SourcePosition
 
   /// The context in which the parser is being used.
   private var context: Context = .default
@@ -52,7 +49,7 @@ public struct Parser {
         try roots.append(parseDeclaration(in: &file))
       } catch let e as ParseError {
         report(e)
-        recover(at: { ($0.tag == .semicolon) || $0.isDeclarationHead })
+        recover(at: { (t) in (t.tag == .semicolon) || t.isDeclarationHead })
       } catch {
         unreachable()
       }
@@ -60,9 +57,6 @@ public struct Parser {
     for e in errors { file.addDiagnostic(.init(e)) }
     swap(&file.roots, &roots)
   }
-
-  /// A sequence of modifiers prefixing a declaration.
-  private typealias DeclarationPrologue = [Parsed<DeclarationModifier>]
 
   /// Parses a declaration.
   ///
@@ -78,7 +72,7 @@ public struct Parser {
   private mutating func parseDeclaration(
     in file: inout Module.SourceContainer
   ) throws -> DeclarationIdentity {
-    let prologue = parseDeclarationModifiers()
+    let prologue = try parseDeclarationPrologue(in: &file)
 
     guard let head = peek() else { throw expected("declaration") }
     switch head.tag {
@@ -111,10 +105,79 @@ public struct Parser {
     }
   }
 
+  /// Parses the annotations and modifiers of a declaration.
+  private mutating func parseDeclarationPrologue(
+    in file: inout Module.SourceContainer
+  ) throws -> DeclarationPrologue {
+    let a = try parseAnnotations(in: &file)
+    let m = parseDeclarationModifiers()
+    return .init(annotations: a, modifiers: m)
+  }
+
+  /// Parses a sequence of annotations.
+  private mutating func parseAnnotations(
+    in file: inout Module.SourceContainer
+  ) throws -> [Annotation] {
+    var annotations: [Annotation] = []
+    while next(is: .at) {
+      try annotations.append(parseAnnotation(in: &file))
+    }
+    return annotations
+  }
+
+  /// Parses an annotation.
+  private mutating func parseAnnotation(
+    in file: inout Module.SourceContainer
+  ) throws -> Annotation {
+    let introducer = try take(.at) ?? expected("'@'")
+    let identifier = try take(.name) ?? expected("identifier")
+
+    if introducer.site.end != identifier.site.start {
+      let s = SourceSpan(from: introducer.site.end, to: identifier.site.start)
+      report(.init("extraneous whitespace between '@' and annotation identifier", at: s))
+    }
+
+    let arguments: [Parsed<Annotation.Argument>]
+    if !whitespaceBeforeNextToken() && next(is: .leftParenthesis) {
+      (arguments, _) = try inParentheses { (m0) in
+        try m0.commaSeparated(until: Token.hasTag(.rightParenthesis)) { (m1) in
+          try m1.parseAnnotationArgument()
+        }
+      }
+    } else {
+      arguments = []
+    }
+
+    return Annotation(
+      identifier: .init(identifier),
+      arguments: arguments,
+      site: span(from: introducer.site.start))
+  }
+
+  /// Parses an argument of an annotation.
+  private mutating func parseAnnotationArgument() throws -> Parsed<Annotation.Argument> {
+    // Is it a string argument?
+    if let s = take(.stringLiteral) {
+      return .init(.string(String(s.text.dropFirst().dropLast())), at: s.site)
+    }
+
+    // Is it a number argument?
+    else if let s = take(.integerLiteral) {
+      if let n = Int(s.text) {
+        return .init(.number(n), at: s.site)
+      } else {
+        throw ParseError("'\(s.text)' is not a valid annotation argument", at: s.site)
+      }
+    }
+
+    // None of the above.
+    else { throw expected("annotation argument") }
+  }
+
   /// Parses a sequence of declaration modifiers.
   private mutating func parseDeclarationModifiers() -> [Parsed<DeclarationModifier>] {
     var modifiers: [Parsed<DeclarationModifier>] = []
-    while let m = parseOptionalDeclarationModifiers() {
+    while let m = parseOptionalDeclarationModifier() {
       append(m)
     }
     return modifiers
@@ -137,13 +200,19 @@ public struct Parser {
     }
   }
 
-  /// Parses a sequence of declaration modifier if the next token denotes one.
+  /// Parses a declaration modifier if the next token denotes one.
   ///
   ///     declaration-modifier ::= (one of)
   ///       static private internal private
   ///
-  private mutating func parseOptionalDeclarationModifiers() -> Parsed<DeclarationModifier>? {
-    parseExpressibleByTokenTag(DeclarationModifier.self)
+  private mutating func parseOptionalDeclarationModifier() -> Parsed<DeclarationModifier>? {
+    if let m = parseExpressibleByTokenTag(DeclarationModifier.self) {
+      return m
+    } else if context == .typeBody, let t = take(contextual: "indirect") {
+      return .init(.indirect, at: t.site)
+    } else {
+      return nil
+    }
   }
 
   /// Parses an associated type declaration.
@@ -157,8 +226,12 @@ public struct Parser {
     let introducer = try take(.type) ?? expected("'type'")
     let identifier = parseSimpleIdentifier()
 
-    // No modifiers allowed on extensions.
-    _ = sanitize(prologue, accepting: { _ in false })
+    if let a = prologue.annotations.first {
+      report(.init("invalid annotation", at: a.site))
+    }
+
+    // No modifiers allowed on associated types.
+    _ = sanitize(prologue.modifiers, accepting: { _ in false })
 
     return file.insert(
       AssociatedTypeDeclaration(
@@ -173,15 +246,19 @@ public struct Parser {
   ///       binding-pattern ('=' expression)?
   ///
   private mutating func parseBindingDeclaration(
-    asGiven: Bool = false,
+    as role: BindingDeclaration.Role = .unconditional,
     after prologue: DeclarationPrologue, in file: inout Module.SourceContainer
   ) throws -> BindingDeclaration.ID {
     let b = try parseBindingPattern(in: &file)
     let i = try parseOptionalInitializerExpression(in: &file)
 
+    if let a = prologue.annotations.first {
+      report(.init("invalid annotation", at: a.site))
+    }
+
     return file.insert(
       BindingDeclaration(
-        modifiers: prologue, isGiven: asGiven, pattern: b, initializer: i,
+        modifiers: prologue.modifiers, role: role, pattern: b, initializer: i,
         site: span(from: file[b].site.start)))
   }
 
@@ -194,13 +271,6 @@ public struct Parser {
     after prologue: DeclarationPrologue, in file: inout Module.SourceContainer
   ) throws -> EnumCaseDeclaration.ID {
     let introducer = try take(.case) ?? expected("'case'")
-
-    if context != .enumBody {
-      report(.init("enum case declaration is not allowed here", at: introducer.site))
-    }
-    let ctx = enter(.default)
-    defer { context = ctx }
-
     let identifier = parseSimpleIdentifier()
     let parameters = try parseParenthesizedParameterList(in: &file)
     let body: ExpressionIdentity?
@@ -214,8 +284,12 @@ public struct Parser {
       body = nil
     }
 
+    if let a = prologue.annotations.first {
+      report(.init("invalid annotation", at: a.site))
+    }
+
     // No modifiers allowed on enum cases.
-    _ = sanitize(prologue, accepting: { _ in false })
+    _ = sanitize(prologue.modifiers, accepting: { _ in false })
 
     return file.insert(
       EnumCaseDeclaration(
@@ -234,19 +308,18 @@ public struct Parser {
     let identifier = parseSimpleIdentifier()
     let parameters = try parseOptionalCompileTimeParameters(in: &file)
     let representation = try next(is: .leftParenthesis) ? parseExpression(in: &file) : nil
-    let bounds = try parseOptionalContextBoundList(until: .leftBrace, in: &file)
-    let members = try entering(.enumBody) { (me) in
-      try me.parseTypeBody(in: &file)
-    }
+    let conformances = try parseOptionalAdjunctConformanceList(until: .leftBrace, in: &file)
+    let members = try parseTypeBody(in: &file, accepting: \.isValidEnumMember)
 
     return file.insert(
       EnumDeclaration(
-        modifiers: sanitize(prologue, accepting: \.isApplicableToTypeDeclaration),
+        annotations: prologue.annotations,
+        modifiers: sanitize(prologue.modifiers, accepting: \.isApplicableToTypeDeclaration),
         introducer: introducer,
         identifier: identifier,
         staticParameters: parameters,
         representation: representation,
-        contextBounds: bounds,
+        conformances: conformances,
         members: members,
         site: span(from: introducer)))
   }
@@ -254,18 +327,48 @@ public struct Parser {
   /// Parses an extension declaration.
   ///
   ///     extension-declaration ::=
-  ///       'extension' expression type-body
+  ///       'extension' compile-time-parameters? expression type-body
+  ///       'extension' identifier ':' expression type-body
   ///
   private mutating func parseExtensionDeclaration(
     after prologue: DeclarationPrologue, in file: inout Module.SourceContainer
   ) throws -> ExtensionDeclaration.ID {
     let introducer = try take(.extension) ?? expected("'extension'")
-    let parameters = try parseOptionalCompileTimeParameters(in: &file)
+    var parameters = try parseOptionalCompileTimeParameters(in: &file)
     let extendee = try parseExpression(in: &file)
-    let members = try parseTypeBody(in: &file)
+
+    // Are we parsing a trait extension?
+    if let colon = take(.colon) {
+      if
+        let n = file[extendee] as? NameExpression,
+        n.isUnqualifiedIdentifier && parameters.isEmpty
+      {
+        let r = try parseExpression(in: &file)
+        let l = file.insert(n)
+        let w = ExpressionIdentity(desugaredConformance(of: .init(l), to: r, in: &file))
+        let u = file.insert(UsingDeclaration(witness: w, site: file[r].site))
+        let p = file.insert(
+          GenericParameterDeclaration(
+            identifier: .init(n.name.value.identifier, at: n.site),
+            ascription: nil,
+            site: n.site))
+
+        parameters = .init(
+          explicit: [p], implicit: [.init(u)], site: n.site.extended(upTo: position.index))
+      } else {
+        report(.init("'unexpected context bound'", at: colon.site))
+        recover(at: Token.hasTag(.leftBrace))
+      }
+    }
+
+    let members = try parseTypeBody(in: &file, accepting: \.isValidStructMember)
+
+    if let a = prologue.annotations.first {
+      report(.init("invalid annotation", at: a.site))
+    }
 
     // No modifiers allowed on extensions.
-    _ = sanitize(prologue, accepting: { _ in false })
+    _ = sanitize(prologue.modifiers, accepting: { _ in false })
 
     return file.insert(
       ExtensionDeclaration(
@@ -290,21 +393,27 @@ public struct Parser {
     // Is the next token a binding introducer?
     let next = try peek() ?? expected("'declaration'")
     if next.isBindingIntroducer {
-      return try .init(parseBindingDeclaration(asGiven: true, after: prologue, in: &file))
+      return try .init(parseBindingDeclaration(as: .given, after: prologue, in: &file))
     }
 
     // Expect a conformance declaration.
     else {
       let parameters = try parseOptionalCompileTimeParameters(in: &file)
       let conformer = try parseExpression(in: &file)
-      _ = try take(.colon) ?? expected("':'")
+      _ = try take(contextual: "is") ?? expected("'is'")
       let concept = try parseExpression(in: &file)
       let witness = desugaredConformance(of: conformer, to: concept, in: &file)
+      let members = self.next(is: .leftBrace)
+        ? try parseTypeBody(in: &file, accepting: \.isValidStructMember)
+        : nil
 
-      let members = try parseTypeBody(in: &file)
+      if let a = prologue.annotations.first {
+        report(.init("invalid annotation", at: a.site))
+      }
 
       let d = file.insert(
         ConformanceDeclaration(
+          modifiers: sanitize(prologue.modifiers, accepting: \.isApplicableToConformance),
           introducer: introducer,
           staticParameters: parameters,
           witness: witness,
@@ -312,34 +421,6 @@ public struct Parser {
           site: span(from: introducer)))
       return .init(d)
     }
-  }
-
-  /// Parses a function declaration.
-  ///
-  ///     function-declaration ::=
-  ///       function-declaration-head callable-body?
-  ///     function-declaration-head ::=
-  ///       'fun' function-identifier parameter-clauses return-type-ascription?
-  ///
-  private mutating func parseFunctionDeclaration(
-    after prologue: DeclarationPrologue, in file: inout Module.SourceContainer
-  ) throws -> FunctionDeclaration.ID {
-    let head = try take(.fun) ?? expected("'fun'")
-    let introducer = Parsed(FunctionDeclaration.Introducer.fun, at: head.site)
-
-    let n = try parseFunctionIdentifier()
-    let (s, r) = try parseParameterClauses(in: &file)
-    let e = parseOptionalAccessEffect() ?? .init(.let, at: .empty(at: position))
-    let o = try parseOptionalReturnTypeAscription(in: &file)
-    let b = try parseOptionalCallableBody(in: &file)
-    return file.insert(
-      FunctionDeclaration(
-        modifiers: prologue,
-        introducer: introducer, identifier: n,
-        staticParameters: s, parameters: r,
-        effect: e,
-        output: o, body: b,
-        site: introducer.site.extended(upTo: position.index)))
   }
 
   /// Parses a function bundle declaration.
@@ -357,32 +438,57 @@ public struct Parser {
     after prologue: DeclarationPrologue, in file: inout Module.SourceContainer
   ) throws -> DeclarationIdentity {
     let introducer = try take(.fun) ?? expected("'fun'")
-
     let identifier = try parseFunctionIdentifier()
-    let (ss, ps) = try parseParameterClauses(in: &file)
+    let parameters = try parseParameterClauses(in: &file)
     let effect = parseOptionalAccessEffect() ?? .init(.let, at: .empty(at: position))
+
+    // Insert the self-parameter of non-static member declarations.
+    let isMember: Bool
+    var p: [ParameterDeclaration.ID] = []
+    if (context == .typeBody) && !prologue.contains(.static) {
+      isMember = true
+      p = [synthesizeSelfParameter(effect: effect, in: &file)] + parameters.1
+    } else {
+      isMember = false
+      p = parameters.1
+    }
+
     let output = try parseOptionalReturnTypeAscription(in: &file)
 
+    // Are we parsing a bundle declaration?
     if effect.value == .auto {
       let b = try parseBundleBody(in: &file)
       let i = asBundleIdentifier(identifier)
       let n = file.insert(
         FunctionBundleDeclaration(
-          modifiers: prologue,
-          introducer: .init(introducer, at: introducer.site), identifier: i,
-          staticParameters: ss, parameters: ps, effect: effect,
-          output: output, variants: b,
+          annotations: prologue.annotations,
+          modifiers: prologue.modifiers,
+          introducer: .init(introducer, at: introducer.site),
+          identifier: i,
+          staticParameters: parameters.0,
+          parameters: p,
+          effect: effect,
+          output: output,
+          variants: b,
           site: introducer.site.extended(upTo: position.index)))
       return .init(n)
-    } else {
+    }
+
+    // We're parsing a regular function declaration.
+    else {
       let f = Parsed(FunctionDeclaration.Introducer.fun, at: introducer.site)
       let b = try parseOptionalCallableBody(in: &file)
       let n = file.insert(
         FunctionDeclaration(
-          modifiers: prologue,
-          introducer: f, identifier: identifier,
-          staticParameters: ss, parameters: ps, effect: effect,
-          output: output, body: b,
+          annotations: prologue.annotations,
+          modifiers: prologue.modifiers,
+          introducer: f,
+          identifier: identifier,
+          staticParameters: parameters.0,
+          parameters: p,
+          effect: isMember ? .init(.let, at: effect.site) : effect,
+          output: output,
+          body: b,
           site: introducer.site.extended(upTo: position.index)))
       return .init(n)
     }
@@ -398,30 +504,40 @@ public struct Parser {
     after prologue: DeclarationPrologue, in file: inout Module.SourceContainer
   ) throws -> FunctionDeclaration.ID {
     let introducer = try parseInitializerIntroducer()
+    let receiver = synthesizeSelfParameter(effect: .init(.set, at: introducer.site), in: &file)
 
-    // Custom initializer?
+    // Are we parsing a custom initializer?
     if introducer.value == .`init` {
-      let (s, r) = try parseParameterClauses(in: &file)
+      let parameters = try parseParameterClauses(in: &file)
       let b = try parseOptionalCallableBody(in: &file)
+
       return file.insert(
         FunctionDeclaration(
-          modifiers: sanitize(prologue, accepting: \.isApplicableToInitializer),
-          introducer: introducer, identifier: .init(.simple("init"), at: introducer.site),
-          staticParameters: s, parameters: r,
-          effect: .init(.set, at: .empty(at: position)),
-          output: nil, body: b,
+          annotations: prologue.annotations,
+          modifiers: sanitize(prologue.modifiers, accepting: \.isApplicableToInitializer),
+          introducer: introducer,
+          identifier: .init(.simple("init"), at: introducer.site),
+          staticParameters: parameters.0,
+          parameters: [receiver] + parameters.1,
+          effect: .init(.let, at: introducer.site),
+          output: nil,
+          body: b,
           site: introducer.site.extended(upTo: position.index)))
     }
 
-    // Memberwise initializer?
+    // Are we parsing a memberwise initializer?
     else if introducer.value == .memberwiseinit {
       return file.insert(
         FunctionDeclaration(
-          modifiers: sanitize(prologue, accepting: \.isApplicableToInitializer),
-          introducer: introducer, identifier: .init(.simple("init"), at: introducer.site),
-          staticParameters: .empty(at: .empty(at: position)), parameters: [],
-          effect: .init(.set, at: .empty(at: position)),
-          output: nil, body: nil,
+          annotations: prologue.annotations,
+          modifiers: sanitize(prologue.modifiers, accepting: \.isApplicableToInitializer),
+          introducer: introducer,
+          identifier: .init(.simple("init"), at: introducer.site),
+          staticParameters: .empty(at: .empty(at: position)),
+          parameters: [receiver],
+          effect: .init(.let, at: introducer.site),
+          output: nil,
+          body: nil,
           site: introducer.site))
     }
 
@@ -472,16 +588,27 @@ public struct Parser {
     let start = nextTokenStart()
 
     return try inAngles { (me) in
-      let xs = try me.parseCommaSeparatedGenericParameters(in: &file)
-      let ys = try me.parseOptionalWhereClause(in: &file)
-      return StaticParameters(explicit: xs, implicit: ys, site: me.span(from: start))
+      // Parse the type parameters and their context bounds.
+      let typesAndBounds = try me.parseCommaSeparatedGenericParameters(in: &file)
+
+      // Insert desugared context bounds before explicit usings.
+      var types = [GenericParameterDeclaration.ID](minimumCapacity: typesAndBounds.count)
+      var usings: [DeclarationIdentity] = []
+      for (t, bs) in typesAndBounds {
+        types.append(t)
+        usings.append(contentsOf: bs.map(DeclarationIdentity.init(_:)))
+      }
+
+      // Parse other usings.
+      try usings.append(contentsOf: me.parseOptionalWhereClause(in: &file))
+      return StaticParameters(explicit: types, implicit: usings, site: me.span(from: start))
     }
   }
 
   /// Parses the generic parameter declarations of a context clause.
   private mutating func parseCommaSeparatedGenericParameters(
     in file: inout Module.SourceContainer
-  ) throws -> [GenericParameterDeclaration.ID] {
+  ) throws -> [(GenericParameterDeclaration.ID, [UsingDeclaration.ID])] {
     let (ps, _) = try commaSeparated(until: Token.oneOf([.rightAngle, .where])) { (me) in
       try me.parseGenericParameterDeclaration(in: &file)
     }
@@ -495,39 +622,62 @@ public struct Parser {
   ///
   private mutating func parseGenericParameterDeclaration(
     in file: inout Module.SourceContainer
-  ) throws -> GenericParameterDeclaration.ID {
+  ) throws -> (GenericParameterDeclaration.ID, [UsingDeclaration.ID]) {
     let n = try take(.name) ?? expected("identifier")
     let a = try parseOptionalKindAscription(in: &file)
-    return file.insert(
+    let b = try parseOptionalContextBoundList(on: n, in: &file)
+    let p = file.insert(
       GenericParameterDeclaration(identifier: .init(n), ascription: a, site: n.site))
+    return (p, b)
   }
 
-  /// Parses a list of context bounds iff the next token is a colon.
-  ///
-  ///     context-bound-list ::=
-  ///       ':' compound-expression ('&' compound-expression)*
-  ///
   private mutating func parseOptionalContextBoundList(
+    on conformer: Token, in file: inout Module.SourceContainer
+  ) throws -> [UsingDeclaration.ID] {
+    guard take(.colon) != nil else { return [] }
+    let bs = try ampersandSeparated(until: Token.oneOf([.comma, .where, .rightAngle])) { (me) in
+      try me.parseContextBound(on: conformer, in: &file)
+    }
+    if bs.isEmpty {
+      report(expected("expression"))
+    }
+    return bs
+  }
+
+  private mutating func parseContextBound(
+    on conformer: Token, in file: inout Module.SourceContainer
+  ) throws -> UsingDeclaration.ID {
+    let rhs = try parseCompoundExpression(in: &file)
+    let lhs = ExpressionIdentity(file.insert(NameExpression(.init(conformer))))
+    let witness = ExpressionIdentity(desugaredConformance(of: lhs, to: rhs, in: &file))
+    return file.insert(UsingDeclaration(witness: witness, site: file[rhs].site))
+  }
+
+  /// Parses a list of adjunct conformance declarations iff the next token is `.is`.
+  ///
+  ///     adjunct-conformance-list ::=
+  ///       'is' compound-expression ('&' compound-expression)*
+  ///
+  private mutating func parseOptionalAdjunctConformanceList(
     until rightDelimiter: Token.Tag, in file: inout Module.SourceContainer
   ) throws -> [ConformanceDeclaration.ID] {
-    if let introducer = take(.colon) {
-      return try ampersandSeparated(until: rightDelimiter) { me in
-        try me.parseContextBound(introducedBy: introducer, in: &file)
+    if let introducer = take(contextual: "is") {
+      return try ampersandSeparated(until: Token.hasTag(rightDelimiter)) { me in
+        try me.parseAdjunctConformance(introducedBy: introducer, in: &file)
       }
     } else {
       return []
     }
   }
 
-  /// Parses a context bound.
+  /// Parses an adjunct conformance declaration.
   ///
-  ///     context-bound ::=
-  ///       compound-expression
-  ///
-  /// A context bound is parsed as a compound expression and immediately desugared as a static call
-  /// whose first argument is a name expression referring to the conforming type. For example, if
-  /// the bound is spelled out as `P<A>` in source, it is desugared as `P<Self, A>`.
-  private mutating func parseContextBound(
+  /// An adjunct conformance declaration is parsed as a compound expression after to the head of a
+  /// type declaration. It is immediately desugared as a static call whose first argument is a name
+  /// expression referring to the conforming type, which forms the type of the witness produced by
+  /// the conformance. For example, if the conformance is spelled out as `P<A>` in source, the
+  /// expression of the witness is desugared as `P<Self, A>`.
+  private mutating func parseAdjunctConformance(
     introducedBy introducer: Token, in file: inout Module.SourceContainer
   ) throws -> ConformanceDeclaration.ID {
     let b = try parseCompoundExpression(in: &file)
@@ -536,7 +686,12 @@ public struct Parser {
 
     return file.insert(
       ConformanceDeclaration(
-        introducer: introducer, staticParameters: .empty(at: s), witness: w, members: [], site: s))
+        modifiers: [],
+        introducer: introducer,
+        staticParameters: .empty(at: s),
+        witness: w,
+        members: [],
+        site: s))
 
     /// Desugards a compound expression into a call of the form `P<Self, ...>`.
     func desugared(bound b: ExpressionIdentity) throws -> StaticCall.ID {
@@ -553,7 +708,7 @@ public struct Parser {
     /// Returns a name expression referring to the conforming type.
     func conformer() -> [ExpressionIdentity] {
       let s = SourceSpan.empty(at: position)
-      let e = file.insert(NameExpression(qualification: nil, name: .init("Self", at: s), site: s))
+      let e = file.insert(NameExpression(.init("Self", at: s)))
       return [.init(e)]
     }
   }
@@ -563,7 +718,7 @@ public struct Parser {
     in file: inout Module.SourceContainer
   ) throws -> [DeclarationIdentity] {
     guard take(.where) != nil else { return [] }
-    let (ps, _) = try commaSeparated(until: .rightAngle) { (me) in
+    let (ps, _) = try commaSeparated(until: Token.hasTag(.rightAngle)) { (me) in
       try me.parseContextParameter(in: &file)
     }
     return ps
@@ -574,16 +729,16 @@ public struct Parser {
     in file: inout Module.SourceContainer
   ) throws -> DeclarationIdentity {
     let l = try parseCompoundExpression(in: &file)
-    let s = try take(.colon) ?? take(.equal) ?? expected("':' or '=='")
+    let s = try take(contextual: "is") ?? take(.equal) ?? expected("'is' or '=='")
     let r = try parseCompoundExpression(in: &file)
 
     let witness: ExpressionIdentity
-    if s.tag == .colon {
-      witness = .init(desugaredConformance(of: l, to: r, in: &file))
-    } else {
+    if s.tag == .equal {
       let w = EqualityWitnessExpression(
         lhs: l, rhs: r, site: file[l].site.extended(toCover: file[r].site))
       witness = .init(file.insert(w))
+    } else {
+      witness = .init(desugaredConformance(of: l, to: r, in: &file))
     }
 
     let d = file.insert(UsingDeclaration(witness: witness, site: file[witness].site))
@@ -595,7 +750,7 @@ public struct Parser {
     in file: inout Module.SourceContainer
   ) throws -> [ParameterDeclaration.ID] {
     let (ps, _) = try inParentheses { (m0) in
-      try m0.commaSeparated(until: .rightParenthesis) { (m1) in
+      try m0.commaSeparated(until: Token.hasTag(.rightParenthesis)) { (m1) in
         try m1.parseParameterDeclaration(in: &file)
       }
     }
@@ -619,7 +774,7 @@ public struct Parser {
 
     switch (take(if: \.isArgumentLabel), take(.name)) {
     case (let n, .some(let m)):
-      identifier = Parsed(String(m.text), at: m.site)
+      identifier = Parsed(m)
       label = n.map({ (t) in t.tag == .underscore ? nil : Parsed(t) }) ?? identifier
 
     case (.some(let n), nil):
@@ -648,17 +803,10 @@ public struct Parser {
   private mutating func parseOptionalCallableBody(
     in file: inout Module.SourceContainer
   ) throws -> [StatementIdentity]? {
-    try peek()?.tag == .leftBrace ? parseCallableBody(in: &file) : nil
-  }
-
-  /// Parses the body of a function, lambda, or subscript.
-  private mutating func parseCallableBody(
-    in file: inout Module.SourceContainer
-  ) throws -> [StatementIdentity] {
-    try inBraces { (m0) in
-      try m0.semicolonSeparated(until: .rightBrace) { (m1) in
-        try m1.parseStatement(in: &file)
-      }
+    if next(is: .leftBrace) {
+      return try entering(.default, { (me) in try me.parseBracedStatementList(in: &file) })
+    } else {
+      return nil
     }
   }
 
@@ -701,18 +849,17 @@ public struct Parser {
     let introducer = try take(.struct) ?? expected("'struct'")
     let identifier = parseSimpleIdentifier()
     let parameters = try parseOptionalCompileTimeParameters(in: &file)
-    let bounds = try parseOptionalContextBoundList(until: .leftBrace, in: &file)
-    let members = try entering(.structBody) { (me) in
-      try me.parseTypeBody(in: &file)
-    }
+    let conformances = try parseOptionalAdjunctConformanceList(until: .leftBrace, in: &file)
+    let members = try parseTypeBody(in: &file, accepting: \.isValidStructMember)
 
     return file.insert(
       StructDeclaration(
-        modifiers: sanitize(prologue, accepting: \.isApplicableToTypeDeclaration),
+        annotations: prologue.annotations,
+        modifiers: sanitize(prologue.modifiers, accepting: \.isApplicableToTypeDeclaration),
         introducer: introducer,
         identifier: identifier,
         staticParameters: parameters,
-        contextBounds: bounds,
+        conformances: conformances,
         members: members,
         site: span(from: introducer)))
   }
@@ -728,7 +875,10 @@ public struct Parser {
     let introducer = try take(.trait) ?? expected("'trait'")
     let identifier = parseSimpleIdentifier()
     let parameters = try parseOptionalCompileTimeParameters(in: &file)
-    let members = try parseTypeBody(in: &file)
+
+    // Base traits are desugared as given requirements before other members.
+    var members = try parseOptionalRefinementList(of: identifier.value,  in: &file)
+    try members.append(contentsOf: parseTypeBody(in: &file, accepting: \.isValidTraitMember))
 
     if let p = parameters.implicit.first {
       report(.init("constraints on trait parameters are not supported yet", at: file[p].site))
@@ -736,12 +886,41 @@ public struct Parser {
 
     return file.insert(
       TraitDeclaration(
-        modifiers: sanitize(prologue, accepting: \.isApplicableToTypeDeclaration),
+        annotations: prologue.annotations,
+        modifiers: sanitize(prologue.modifiers, accepting: \.isApplicableToTypeDeclaration),
         introducer: introducer,
         identifier: identifier,
         parameters: parameters.explicit,
         members: members,
         site: span(from: introducer)))
+  }
+
+  /// Parses an ampersand-separated list of base traits iff the next token is the `refines` keyword
+  /// and desugars them as given requirements.
+  ///
+  /// A base trait declaration is parsed as a compound expression affixed to the head of a trait
+  /// declaration. It is immediately desugared as a given requirement whose witness denotes a
+  /// conformance to the base trait.
+  private mutating func parseOptionalRefinementList(
+    of refined: String, in file: inout Module.SourceContainer
+  ) throws -> [DeclarationIdentity] {
+    guard let introducer = take(contextual: "refines") else { return [] }
+
+    return try ampersandSeparated(until: Token.hasTag(.rightBrace)) { (me) in
+      let span = SourceSpan.empty(at: me.nextTokenStart())
+      let t0 = try me.parseCompoundExpression(in: &file)
+      let t1 = me.synthesizeNameExpression([refined, "Self"], at: span, in: &file)
+      let t2 = me.desugaredConformance(of: .init(t1), to: t0, in: &file)
+      let t3 = file.insert(
+        ConformanceDeclaration(
+          modifiers: [],
+          introducer: introducer,
+          staticParameters: .empty(at: span),
+          witness: t2,
+          members: nil,
+          site: file[t0].site))
+      return DeclarationIdentity(t3)
+    }
   }
 
   /// Parses a the body of a type declaration.
@@ -752,11 +931,17 @@ public struct Parser {
   ///       type-members? ';'* declaration ';'*
   ///
   private mutating func parseTypeBody(
-    in file: inout Module.SourceContainer
+    in file: inout Module.SourceContainer, accepting isValid: (SyntaxTag) -> Bool
   ) throws -> [DeclarationIdentity] {
-    try inBraces { (m0) in
-      try m0.semicolonSeparated(until: .rightBrace) { (m1) in
-        try m1.parseDeclaration(in: &file)
+    try entering(.typeBody) { (m0) in
+      try m0.inBraces { (m1) in
+        try m1.semicolonSeparated(until: .rightBrace) { (m2) in
+          let d = try m2.parseDeclaration(in: &file)
+          if !isValid(file.tag(of: d)) {
+            m2.report(.init("declaration is not allowed here", at: .empty(at: file[d].site.start)))
+          }
+          return d
+        }
       }
     }
   }
@@ -774,9 +959,13 @@ public struct Parser {
     _ = try take(.assign) ?? expected("'='")
     let aliasee = try parseExpression(in: &file)
 
+    if let a = prologue.annotations.first {
+      report(.init("invalid annotation", at: a.site))
+    }
+
     return file.insert(
       TypeAliasDeclaration(
-        modifiers: sanitize(prologue, accepting: \.isApplicableToTypeDeclaration),
+        modifiers: sanitize(prologue.modifiers, accepting: \.isApplicableToTypeDeclaration),
         introducer: introducer,
         identifier: identifier,
         aliasee: aliasee,
@@ -808,8 +997,9 @@ public struct Parser {
 
   /// Returns `modifiers` sans those that do not satisfy `isValid`.
   private mutating func sanitize(
-    _ modifiers: consuming DeclarationPrologue, accepting isValid: (DeclarationModifier) -> Bool
-  ) -> DeclarationPrologue {
+    _ modifiers: consuming [Parsed<DeclarationModifier>],
+    accepting isValid: (DeclarationModifier) -> Bool
+  ) -> [Parsed<DeclarationModifier>] {
     var end = modifiers.count
     for i in (0 ..< modifiers.count).reversed() where !isValid(modifiers[i].value) {
       report(.init("declaration cannot be marked '\(modifiers[i].value)'", at: modifiers[i].site))
@@ -838,7 +1028,7 @@ public struct Parser {
     // Can we parse a term operator?
     while p < .max {
       // Next token isn't considered an infix operator unless it is surrounded by whitespaces.
-      guard let h = peek(), h.isOperator, whitespaceBeforeNextToken() else { break }
+      guard let h = peek(), h.isOperatorHead, whitespaceBeforeNextToken() else { break }
       guard let (o, q) = try parseOptionalInfixOperator(notTighterThan: p) else { break }
 
       let r = try parseInfixExpression(minimumPrecedence: q.next, in: &file)
@@ -889,7 +1079,7 @@ public struct Parser {
     in file: inout Module.SourceContainer
   ) throws -> ExpressionIdentity {
     // Is there a prefix operator? (note: `&` is not a prefix operator)
-    if let h = peek(), h.isOperator, (h.tag != .ampersand) {
+    if let h = peek(), h.isOperatorHead, (h.tag != .ampersand) {
       let o = try parseOperator()
       if whitespaceBeforeNextToken() { report(separatedUnaryOperator(o)) }
 
@@ -939,17 +1129,15 @@ public struct Parser {
     while true {
       // The period separating nominal components binds more tightly than mutation markers.
       if let n = try appendNominalComponent(to: h, in: &file) {
-        h = n; continue
-      }
-
-      if let m = marker.take() {
+        h = n
+      } else if let m = marker.take() {
         h = .init(file.insert(InoutExpression(marker: m, lvalue: h, site: span(from: m))))
-      }
-
-      if let n = try appendParenthesizedArguments(to: h, in: &file) {
+      } else if let n = try appendParenthesizedArguments(to: h, in: &file) {
         h = n
+      } else if let n = try appendBracketedArguments(to: h, in: &file) {
+        h = n; continue
       } else if let n = try appendAngledArguments(to: h, in: &file) {
-        h = n
+        h = n; continue
       } else {
         break
       }
@@ -969,8 +1157,38 @@ public struct Parser {
     return .init(m)
   }
 
-  /// If the next token is a left parenthesis, parses an argument list and returns a call
-  /// expression applying `head`. Otherwise, returns `nil`.
+  /// If the next token is a left angle, parses an argument list and returns a static call applying
+  /// `head`. Otherwise, returns `nil`.
+  private mutating func appendAngledArguments(
+    to head: ExpressionIdentity, in file: inout Module.SourceContainer
+  ) throws -> ExpressionIdentity? {
+    if whitespaceBeforeNextToken() || !next(is: .leftAngle) { return nil }
+    let (a, _) = try inAngles { (m0) in
+      try m0.commaSeparated(until: Token.hasTag(.rightAngle)) { (m1) in
+        try m1.parseExpression(in: &file)
+      }
+    }
+    let s = file[head].site.extended(upTo: position.index)
+    let m = file.insert(StaticCall(callee: head, arguments: a, site: s))
+    return .init(m)
+  }
+
+  /// If the next token is a left bracket, parses an argument list and returns a call applying
+  /// `head`. Otherwise, returns `nil`.
+  private mutating func appendBracketedArguments(
+    to head: ExpressionIdentity, in file: inout Module.SourceContainer
+  ) throws -> ExpressionIdentity? {
+    if whitespaceBeforeNextToken() || !next(is: .leftBracket) { return nil }
+    let (a, _) = try inBrackets { (me) in
+      try me.parseLabeledExpressionList(until: .rightBracket, in: &file)
+    }
+    let s = file[head].site.extended(upTo: position.index)
+    let m = file.insert(Call(callee: head, arguments: a, style: .bracketed, site: s))
+    return .init(m)
+  }
+
+  /// If the next token is a left parenthesis, parses an argument list and returns a call applying
+  /// `head`. Otherwise, returns `nil`.
   private mutating func appendParenthesizedArguments(
     to head: ExpressionIdentity, in file: inout Module.SourceContainer
   ) throws -> ExpressionIdentity? {
@@ -980,22 +1198,6 @@ public struct Parser {
     }
     let s = file[head].site.extended(upTo: position.index)
     let m = file.insert(Call(callee: head, arguments: a, style: .parenthesized, site: s))
-    return .init(m)
-  }
-
-  /// If the next token is a left angle, parses an argument list and returns a static call
-  /// expression applying `h`. Otherwise, returns `nil`.
-  private mutating func appendAngledArguments(
-    to head: ExpressionIdentity, in file: inout Module.SourceContainer
-  ) throws -> ExpressionIdentity? {
-    if whitespaceBeforeNextToken() || !next(is: .leftAngle) { return nil }
-    let (a, _) = try inAngles { (m0) in
-      try m0.commaSeparated(until: .rightAngle) { (m1) in
-        try m1.parseExpression(in: &file)
-      }
-    }
-    let s = file[head].site.extended(upTo: position.index)
-    let m = file.insert(StaticCall(callee: head, arguments: a, site: s))
     return .init(m)
   }
 
@@ -1033,10 +1235,16 @@ public struct Parser {
     switch peek()?.tag {
     case .true, .false:
       return .init(file.insert(BooleanLiteral(site: take()!.site)))
+    case .integerLiteral:
+      return .init(file.insert(IntegerLiteral(site: take()!.site)))
+    case .stringLiteral:
+      return .init(file.insert(StringLiteral(site: take()!.site)))
     case .underscore:
       return try .init(parseWildcardLiteral(in: &file))
     case .dot:
       return try .init(parseImplicitlyQualifiedNameExpression(in: &file))
+    case .if:
+      return try .init(parseIf(in: &file))
     case .match:
       return try .init(parsePatternMatch(in: &file))
     case .name:
@@ -1066,16 +1274,12 @@ public struct Parser {
 
     // Environment.
     let environment = try inBrackets { (me) -> ExpressionIdentity? in
-      if me.next(is: .rightBracket) {
-        return nil
-      } else {
-        return try me.parseExpression(in: &file)
-      }
+      me.next(is: .rightBracket) ? nil : try me.parseExpression(in: &file)
     }
 
     // Parameters.
     let (parameters, _) = try inParentheses { (m0) in
-      try m0.commaSeparated(until: .rightParenthesis) { (m1) in
+      try m0.commaSeparated(until: Token.hasTag(.rightParenthesis)) { (m1) in
         try m1.parseArrowParameter(in: &file)
       }
     }
@@ -1111,11 +1315,7 @@ public struct Parser {
         if n.isKeyword { report(.init("'\(n.text)' is not a valid identifier", at: n.site)) }
         label = nil
         ascription = .init(
-          file.insert(
-            NameExpression(
-              qualification: nil,
-              name: Parsed(Name(identifier: String(n.text)), at: n.site),
-              site: n.site)))
+          file.insert(NameExpression(Parsed(Name(identifier: String(n.text)), at: n.site))))
       }
     } else {
       label = nil
@@ -1126,10 +1326,80 @@ public struct Parser {
     return .init(label: label, ascription: a)
   }
 
+  /// Parses an if-expression.
+  ///
+  ///     conditional-expression ::=
+  ///       'if' condition-item (',' condition-item)* '{' statement-list '}' else?
+  ///     else ::=
+  ///       'else' conditional-expression
+  ///       'else' '{' statement-list '}'
+  ///
+  private mutating func parseIf(in file: inout Module.SourceContainer) throws -> If.ID {
+    let i = try take(.if) ?? expected("'if'")
+    let c = try parseConditionList(in: &file)
+    let s = try parseConditionalBody(in: &file)
+    let f = try parseElseBranch(in: &file)
+    return file.insert(
+      If(introducer: i, conditions: c, success: s, failure: f, site: span(from: i)))
+  }
+
+  /// Parses a condition.
+  private mutating func parseConditionList(
+    in file: inout Module.SourceContainer
+  ) throws -> [ConditionIdentity] {
+    var result = [try parseCondition(in: &file)]
+    while take(.comma) != nil {
+      result.append(try parseCondition(in: &file))
+    }
+    return result
+  }
+
+  /// Parses a single item in a condition.
+  private mutating func parseCondition(
+    in file: inout Module.SourceContainer
+  ) throws -> ConditionIdentity {
+    let head = try peek() ?? expected("expression")
+    switch head.tag {
+    case .inout, .let, .set, .sink, .var:
+      return try .init(parseBindingDeclaration(as: .condition, after: .none(), in: &file))
+    default:
+      return try .init(parseExpression(in: &file))
+    }
+  }
+
+  /// Parses the else-branch of a conditional expression iff the next token if `else` or returns
+  /// an empty block otherwise.
+  private mutating func parseElseBranch(
+    in file: inout Module.SourceContainer
+  ) throws -> If.ElseIdentity {
+    // Can we consume `else`?
+    if take(.else) != nil {
+      if next(is: .if) {
+        return try .init(parseIf(in: &file))
+      } else {
+        return try .init(parseConditionalBody(in: &file))
+      }
+    }
+
+    // Create an empty block at the currentposition.
+    else {
+      return .init(file.insert(Block(introducer: nil, statements: [], site: .empty(at: position))))
+    }
+  }
+
+  /// Parses the body of a conditional expression or loop.
+  private mutating func parseConditionalBody(
+    in file: inout Module.SourceContainer
+  ) throws -> Block.ID {
+    let start = nextTokenStart()
+    let ss = try parseBracedStatementList(in: &file)
+    return file.insert(Block(introducer: nil, statements: ss, site: span(from: start)))
+  }
+
   /// Parses a pattern matching expression.
   ///
   ///     pattern-match ::=
-  ///       match expression '{' pattern-match-case* '}'
+  ///       'match' expression '{' pattern-match-case* '}'
   ///
   private mutating func parsePatternMatch(
     in file: inout Module.SourceContainer
@@ -1221,7 +1491,7 @@ public struct Parser {
     in file: inout Module.SourceContainer
   ) throws -> NameExpression.ID {
     let n = try parseName()
-    return file.insert(NameExpression(qualification: .none, name: n, site: n.site))
+    return file.insert(NameExpression(n))
   }
 
   /// Parses a name.
@@ -1648,6 +1918,17 @@ public struct Parser {
     }
   }
 
+  /// Parses a list of statements in braces.
+  private mutating func parseBracedStatementList(
+    in file: inout Module.SourceContainer
+  ) throws -> [StatementIdentity] {
+    try inBraces { (m0) in
+      try m0.semicolonSeparated(until: .rightBrace) { (m1) in
+        try m1.parseStatement(in: &file)
+      }
+    }
+  }
+
   // MARK: Identifiers
 
   /// Parses a function identifier.
@@ -1662,7 +1943,7 @@ public struct Parser {
       if t.isOperatorNotation {
         let i = try parseOperatorIdentifier()
         return .init(.operator(i.value.notation, i.value.identifier), at: i.site)
-      } else if t.isOperator {
+      } else if t.isOperatorHead {
         report(.init("missing operator notation", at: .empty(at: t.site.start)))
         let o = try parseOperator()
         return .init(.operator(.none, String(o.text)), at: o)
@@ -1713,10 +1994,10 @@ public struct Parser {
     }
 
     // Multi-token operators.
-    let first = try take(oneOf: [.leftAngle, .rightAngle, .star]) ?? expected("operator")
+    let first = try take(if: \.isOperatorHead) ?? expected("operator")
     var last = first
     while let u = peek(), u.site.region.lowerBound == last.site.region.upperBound {
-      if let next = take(if: \.isOperator) {
+      if let next = take(if: \.isOperatorTail) {
         last = next
       } else {
         break
@@ -1744,7 +2025,7 @@ public struct Parser {
   /// Parses a simple identifier.
   private mutating func parseSimpleIdentifier() -> Parsed<String> {
     if let n = take(.name) {
-      return .init(String(n.text), at: n.site)
+      return .init(n)
     } else {
       report(expected("identifier"))
       return .init("$!", at: .empty(at: position))
@@ -1774,15 +2055,14 @@ public struct Parser {
     of conformer: ExpressionIdentity, to concept: ExpressionIdentity,
     in file: inout Module.SourceContainer
   ) -> StaticCall.ID {
-    let witnessSite = file[conformer].site.extended(toCover: file[concept].site)
     if let rhs = file[concept] as? StaticCall {
       let desugared = StaticCall(
         callee: rhs.callee, arguments: [conformer] + rhs.arguments,
-        site: witnessSite)
+        site: file[concept].site)
       return file.replace(concept, for: desugared)
     } else {
       return file.insert(
-        StaticCall(callee: concept, arguments: [conformer], site: witnessSite))
+        StaticCall(callee: concept, arguments: [conformer], site: file[concept].site))
     }
   }
 
@@ -1798,6 +2078,37 @@ public struct Parser {
       let k = Parsed<AccessEffect>(.let, at: .empty(at: s.start))
       return file.insert(RemoteTypeExpression(access: k, projectee: ascription, site: s))
     }
+  }
+
+  /// Returns a tree expressing the declaration of a self-parameter with the given `effect`.
+  private mutating func synthesizeSelfParameter(
+    effect: Parsed<AccessEffect>, in file: inout Module.SourceContainer
+  ) -> ParameterDeclaration.ID {
+    let t0 = Parsed("self", at: effect.site)
+    let t1 = file.insert(
+      NameExpression(.init("Self", at: effect.site)))
+    let t2 = file.insert(
+      RemoteTypeExpression(access: effect, projectee: .init(t1), site: effect.site))
+    let x3 = file.insert(
+      ParameterDeclaration(
+        label: t0, identifier: t0, ascription: t2,
+        defaultValue: nil, lazyModifier: nil, site: effect.site))
+    return x3
+  }
+
+  /// Returns a name expression with the given components.
+  private func synthesizeNameExpression(
+    _ components: [String], at site: SourceSpan, in file: inout Module.SourceContainer
+  ) -> NameExpression.ID {
+    var q: NameExpression.ID? = nil
+    for n in components {
+      q = file.insert(
+        NameExpression(
+          qualification: q.map(ExpressionIdentity.init(_:)),
+          name: Parsed(Name(identifier: String(n)), at: site),
+          site: site))
+    }
+    return q!
   }
 
   // MARK: Helpers
@@ -1910,11 +2221,6 @@ public struct Parser {
     while next(satisfies: predicate) { _ = take() }
   }
 
-  /// Discards tokens until the next token may be at the beginning of a top-level declaration.
-  private mutating func discardUntilNextTopLevelDeclaration() {
-    recover(at: { $0.isDeclarationHead })
-  }
-
   /// Discards token until `predicate` is satisfied or the next token is a unbalanced delimiter.
   private mutating func recover(at predicate: (Token) -> Bool) {
     var nesting = 0
@@ -1940,12 +2246,6 @@ public struct Parser {
     swap(&ctx, &self.context)
     defer { swap(&ctx, &self.context) }
     return try parse(&self)
-  }
-
-  /// Enters the given context and returns the current one.
-  private mutating func enter(_ ctx: Context) -> Context {
-    defer { self.context = ctx }
-    return self.context
   }
 
   /// Parses an instance of `T` or restores `self` to its current state if that fails.
@@ -1990,7 +2290,7 @@ public struct Parser {
     until rightDelimiter: Token.Tag,
     _ parse: (inout Self) throws -> T.Value
   ) throws -> ([T], lastComma: Token?) {
-    try commaSeparated(until: rightDelimiter) { (me) in
+    try commaSeparated(until: Token.hasTag(rightDelimiter)) { (me) in
       try me.labeled(parse)
     }
   }
@@ -2051,20 +2351,13 @@ public struct Parser {
     return (xs, lastComma)
   }
 
-  /// Parses a list of instances of `T` separated by colons.
-  private mutating func commaSeparated<T>(
-    until rightDelimiter: Token.Tag?, _ parse: (inout Self) throws -> T
-  ) throws -> ([T], lastComma: Token?) {
-    try commaSeparated(until: { (t) in t.tag == rightDelimiter }, parse)
-  }
-
   /// Parses a list of instances of `T` separated by newlines or semicolons.
   private mutating func semicolonSeparated<T>(
     until rightDelimiter: Token.Tag?, _ parse: (inout Self) throws -> T
   ) throws -> [T] {
     var xs: [T] = []
     while let head = peek() {
-      discard(while: { $0.tag == .semicolon })
+      discard(while: { (t) in t.tag == .semicolon })
       if head.tag == rightDelimiter { break }
       do {
         try xs.append(parse(&self))
@@ -2078,18 +2371,17 @@ public struct Parser {
 
   /// Parses a list of instances of `T` separated by ampersands (i.e., `&`).
   private mutating func ampersandSeparated<T>(
-    until rightDelimiter: Token.Tag, _ parse: (inout Self) throws -> T
+    until isRightDelimiter: (Token) -> Bool, _ parse: (inout Self) throws -> T
   ) throws -> [T] {
     var xs: [T] = []
-    while let head = peek() {
-      if head.tag == rightDelimiter { break }
+    while let head = peek(), !isRightDelimiter(head) {
       do {
         try xs.append(parse(&self))
       } catch let e as ParseError {
         report(e)
-        recover(at: Token.oneOf([rightDelimiter, .ampersand]))
+        recover(at: { (t) in isRightDelimiter(t) || t.tag == .ampersand })
       }
-      _ = take(.ampersand)
+      if take(.ampersand) == nil { break }
     }
     return xs
   }
@@ -2183,6 +2475,15 @@ extension Parsed<String> {
 
 }
 
+extension Parsed<Name> {
+
+  /// Creates an instance with the text of `t`.
+  fileprivate init(_ t: Token) {
+    self.init(Name(identifier: String(t.text)), at: t.site)
+  }
+
+}
+
 extension Token {
 
   /// Returns a predicate that holds for a token iff that token's tag is in `ks`.
@@ -2212,9 +2513,60 @@ extension Token.Tag {
 
 }
 
+extension SyntaxTag {
+
+  /// Returns `true` if a tree with this tag can occur as an enum member.
+  fileprivate var isValidEnumMember: Bool {
+    (self == EnumCaseDeclaration.self) || isValidStructMember
+  }
+
+  /// Returns `true` if a tree with this tag can occur as a struct member.
+  fileprivate var isValidStructMember: Bool {
+    switch self {
+    case BindingDeclaration.self:
+      return true
+    case ConformanceDeclaration.self:
+      return true
+    case FunctionBundleDeclaration.self:
+      return true
+    case FunctionDeclaration.self:
+      return true
+    case AssociatedTypeDeclaration.self:
+      return false
+    default:
+      return self.value is any TypeDeclaration.Type
+    }
+  }
+
+  /// Returns `true` if a tree with this tag can occur as a trait member.
+  fileprivate var isValidTraitMember: Bool {
+    switch self {
+    case AssociatedTypeDeclaration.self:
+      return true
+    case ConformanceDeclaration.self:
+      return true
+    case FunctionBundleDeclaration.self:
+      return true
+    case FunctionDeclaration.self:
+      return true
+    default:
+      return false
+    }
+  }
+
+}
+
+/// A type whose instances can be created from a single token.
+fileprivate protocol ExpressibleByTokenTag {
+
+  /// Creates an instance from `tag`.
+  init?(tag: Token.Tag)
+
+}
+
 extension AccessEffect: ExpressibleByTokenTag {
 
-  internal init?(tag: Token.Tag) {
+  fileprivate init?(tag: Token.Tag) {
     switch tag {
     case .auto: self = .auto
     case .inout: self = .inout
@@ -2229,7 +2581,7 @@ extension AccessEffect: ExpressibleByTokenTag {
 
 extension DeclarationModifier: ExpressibleByTokenTag {
 
-  internal init?(tag: Token.Tag) {
+  fileprivate init?(tag: Token.Tag) {
     switch tag {
     case .static: self = .static
     case .private: self = .private
@@ -2243,13 +2595,34 @@ extension DeclarationModifier: ExpressibleByTokenTag {
 
 extension OperatorNotation: ExpressibleByTokenTag {
 
-  internal init?(tag: Token.Tag) {
+  fileprivate init?(tag: Token.Tag) {
     switch tag {
     case .infix: self = .infix
     case .postfix: self = .postfix
     case .prefix: self = .prefix
     default: return nil
     }
+  }
+
+}
+
+/// A sequence of annotations and modifiers prefixing a declaration.
+fileprivate struct DeclarationPrologue {
+
+  /// The prefixing annotations.
+  fileprivate let annotations: [Annotation]
+
+  /// The prefixing modifiers.
+  fileprivate let modifiers: [Parsed<DeclarationModifier>]
+
+  /// Returns `true` iff `self` contains a modifier with the given value.
+  fileprivate func contains(_ m: DeclarationModifier) -> Bool {
+    modifiers.contains(where: { (n) in n.value == m })
+  }
+
+  /// Returns a prologue containing no annotation and no modifier.
+  fileprivate static func none() -> Self {
+    .init(annotations: [], modifiers: [])
   }
 
 }

@@ -20,6 +20,18 @@ public struct NameExpression: Expression {
     self.site = site
   }
 
+  /// Creates an instance with the given name and no qualification
+  public init(_ name: Parsed<Name>) {
+    self.qualification = nil
+    self.name = name
+    self.site = name.site
+  }
+
+  /// Returns `true` if `self` is an unqualified simple identifier.
+  public var isUnqualifiedIdentifier: Bool {
+    (qualification == nil) && name.value.isSimple
+  }
+
 }
 
 extension NameExpression: Showable {

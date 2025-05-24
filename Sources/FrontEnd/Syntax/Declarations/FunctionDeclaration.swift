@@ -3,7 +3,7 @@ import Utilities
 
 /// The declaration of a function.
 @Archivable
-public struct FunctionDeclaration: RoutineDeclaration, Scope {
+public struct FunctionDeclaration: RoutineDeclaration, Annotatable, Scope {
 
   /// The introducer of an initializer declaration.
   @Archivable
@@ -19,6 +19,9 @@ public struct FunctionDeclaration: RoutineDeclaration, Scope {
     case memberwiseinit
 
   }
+
+  /// The annotations on this declaration.
+  public let annotations: [Annotation]
 
   /// The modifiers applied to this declaration.
   public let modifiers: [Parsed<DeclarationModifier>]
@@ -49,6 +52,7 @@ public struct FunctionDeclaration: RoutineDeclaration, Scope {
 
   /// Creates an instance with the given properties.
   public init(
+    annotations: [Annotation],
     modifiers: [Parsed<DeclarationModifier>],
     introducer: Parsed<Introducer>,
     identifier: Parsed<FunctionIdentifier>,
@@ -59,6 +63,7 @@ public struct FunctionDeclaration: RoutineDeclaration, Scope {
     body: [StatementIdentity]?,
     site: SourceSpan
   ) {
+    self.annotations = annotations
     self.modifiers = modifiers
     self.introducer = introducer
     self.identifier = identifier
@@ -82,6 +87,7 @@ extension FunctionDeclaration: Showable {
   /// Returns a textual representation of `self` using `printer`.
   public func show(using printer: inout TreePrinter) -> String {
     var result = ""
+    for a in annotations { result.append("\(printer.show(a))\n") }
     for m in modifiers { result.append("\(m) ") }
 
     switch introducer.value {

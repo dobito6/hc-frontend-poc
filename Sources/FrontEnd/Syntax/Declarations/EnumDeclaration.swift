@@ -2,7 +2,10 @@ import Archivist
 
 /// The declaration of an enumeration.
 @Archivable
-public struct EnumDeclaration: TypeDeclaration, ModifiableDeclaration, Scope {
+public struct EnumDeclaration: TypeDeclaration, ModifiableDeclaration, Annotatable, Scope {
+
+  /// The annotations on this declaration.
+  public let annotations: [Annotation]
 
   /// The modifiers applied to this declaration.
   public let modifiers: [Parsed<DeclarationModifier>]
@@ -20,7 +23,7 @@ public struct EnumDeclaration: TypeDeclaration, ModifiableDeclaration, Scope {
   public let representation: ExpressionIdentity?
 
   /// The conformances declared along with the struct.
-  public let contextBounds: [ConformanceDeclaration.ID]
+  public let conformances: [ConformanceDeclaration.ID]
 
   /// The members of the declared struct.
   public let members: [DeclarationIdentity]
@@ -30,21 +33,23 @@ public struct EnumDeclaration: TypeDeclaration, ModifiableDeclaration, Scope {
 
   /// Creates an instance with the given properties.
   public init(
+    annotations: [Annotation],
     modifiers: [Parsed<DeclarationModifier>],
     introducer: Token,
     identifier: Parsed<String>,
     staticParameters: StaticParameters,
     representation: ExpressionIdentity?,
-    contextBounds: [ConformanceDeclaration.ID],
+    conformances: [ConformanceDeclaration.ID],
     members: [DeclarationIdentity],
     site: SourceSpan
   ) {
+    self.annotations = annotations
     self.modifiers = modifiers
     self.introducer = introducer
     self.identifier = identifier
     self.staticParameters = staticParameters
     self.representation = representation
-    self.contextBounds = contextBounds
+    self.conformances = conformances
     self.members = members
     self.site = site
   }
@@ -67,9 +72,9 @@ extension EnumDeclaration: Showable {
       result.append("(\(printer.show(r)))")
     }
 
-    if !contextBounds.isEmpty {
-      result.append(": ")
-      result.append(printer.show(contextBounds, separatedBy: " & "))
+    if !conformances.isEmpty {
+      result.append(" is ")
+      result.append(printer.showAdjunct(conformances))
     }
 
     result.append(" {\n")

@@ -9,7 +9,7 @@ public struct Program: Sendable {
   public typealias ModuleIdentity = Int
 
   /// The identity of a file added to a module.
-  public struct SourceFileIdentity: Hashable, RawRepresentable, Showable, Sendable {
+  public struct SourceFileIdentity: Comparable, Hashable, RawRepresentable, Showable, Sendable {
 
     /// The raw value of this identity.
     public let rawValue: UInt32
@@ -44,6 +44,11 @@ public struct Program: Sendable {
     /// Returns the contents of `self`.
     public func show(using printer: inout TreePrinter) -> String {
       printer.program[self].source.text
+    }
+
+    /// Returns `true` iff `l` is ordered before `r` when iterating over the sources of a module.
+    public static func < (l: Self, r: Self) -> Bool {
+      l.rawValue < r.rawValue
     }
 
   }
@@ -99,19 +104,21 @@ public struct Program: Sendable {
 
   /// Computes the scoping relationships in `m`.
   public mutating func assignScopes(_ m: ModuleIdentity) async {
-    await Scoper().visit(m, in: &self)
+    await Scoper().visit(m, of: &self)
+  }
+
+  /// Re-compute the scoping relationships of `n`'s immediate children.
+  public mutating func reassignScopes<T: SyntaxIdentity>(childrenOf n: T) {
+    for c in children(n) {
+      self[c.file].syntaxToParent[c.offset] = n.offset
+    }
   }
 
   /// Assigns types to the syntax trees of `m`.
   public mutating func assignTypes(_ m: ModuleIdentity) {
-    var typer = Typer(typing: m, in: consume self)
+    var typer = Typer(typing: m, of: consume self)
     typer.apply()
     self = typer.release()
-  }
-
-  /// Inserts a copy of `n` into `self`.
-  public mutating func clone(_ n: ExpressionIdentity) -> ExpressionIdentity {
-    modules.values[n.module].clone(n)
   }
 
   /// Projects the module identified by `m`.
@@ -136,6 +143,13 @@ public struct Program: Sendable {
     modules.values[n.module][n]
   }
 
+  /// Returns the nodes that are immediate children of `n`.
+  public func children<T: SyntaxIdentity>(_ n: T) -> [AnySyntaxIdentity] {
+    var enumerator = ChildrenEnumerator()
+    visit(n, calling: &enumerator)
+    return enumerator.children
+  }
+
   /// Returns a lambda accessing `path` on an instance of `T`.
   public func read<T: Syntax, U>(_ path: KeyPath<T, U>) -> (_ n: T.ID) -> U {
     { (n) in self[n][keyPath: path] }
@@ -146,6 +160,13 @@ public struct Program: Sendable {
     _ t: T.Type, in ns: S
   ) -> (some Sequence<ConcreteSyntaxIdentity<T>>) where S.Element: SyntaxIdentity {
     ns.lazy.compactMap({ (n) in cast(n, to: t) })
+  }
+
+  /// Returns the top level declarations of `m` that are of type `T`.
+  public func collectTopLevel<T: Syntax>(
+    _ t: T.Type, of m: ModuleIdentity
+  ) -> (some Sequence<ConcreteSyntaxIdentity<T>>) {
+    collect(t, in: self[m].topLevelDeclarations)
   }
 
   /// Returns a textual representation of `item` using the given configuration.
@@ -217,7 +238,7 @@ public struct Program: Sendable {
   public func isGiven<T: SyntaxIdentity>(_ n: T) -> Bool {
     switch tag(of: n) {
     case BindingDeclaration.self:
-      return self[castUnchecked(n, to: BindingDeclaration.self)].isGiven
+      return self[castUnchecked(n, to: BindingDeclaration.self)].role == .given
     case ConformanceDeclaration.self:
       return true
     case UsingDeclaration.self:
@@ -241,7 +262,7 @@ public struct Program: Sendable {
 
   /// Returns `true` iff `n` declares a non-static member entity.
   ///
-  /// - Requires: The module containing `s` is scoped.
+  /// - Requires: The module containing `n` is scoped.
   public func isMember<T: SyntaxIdentity>(_ n: T) -> Bool {
     guard let m = parent(containing: n).node else { return false }
 
@@ -287,14 +308,14 @@ public struct Program: Sendable {
     }
   }
 
-  /// Returns `true` iff `n` is a foreign function interface.
-  public func isFFI(_ n: FunctionDeclaration.ID) -> Bool {
-    false
+  /// Returns `true` iff `n` is a an interface for a function written in another language.
+  public func isForeign(_ n: FunctionDeclaration.ID) -> Bool {
+    self[n].annotations.contains(where: { (a) in a.identifier.value == "foreign" })
   }
 
   /// Returns `true` iff `n` has an external implementation.
-  public func isExternal(_ n: FunctionDeclaration.ID) -> Bool {
-    false
+  public func isExtern(_ n: FunctionDeclaration.ID) -> Bool {
+    self[n].annotations.contains(where: { (a) in a.identifier.value == "extern" })
   }
 
   /// Returns `true` iff `n` denotes an expression.
@@ -334,16 +355,27 @@ public struct Program: Sendable {
     }
   }
 
-  /// Returns the left-most tree in the qualification of `n`.
-  public func rootQualification(of n: NameExpression.ID) -> ExpressionIdentity? {
-    guard var q = self[n].qualification else { return nil }
+  /// Returns the left-most tree in the qualification of `e` iff `e` is a name or new expression.
+  /// Otherwise, returns `nil`.
+  public func rootQualification(of e: ExpressionIdentity) -> ExpressionIdentity? {
+    var root: ExpressionIdentity
+
+    if let n = cast(e, to: NameExpression.self) {
+      guard let q = self[n].qualification else { return nil }
+      root = q
+    } else if let n = cast(e, to: New.self) {
+      root = self[n].qualification
+    } else {
+      return nil
+    }
+
     while true {
-      if let x = cast(q, to: NameExpression.self) {
-        if let y = self[x].qualification { q = y } else { return nil }
-      } else if let x = cast(q, to: Call.self) {
-        q = self[x].callee
+      if let x = cast(root, to: NameExpression.self) {
+        if let y = self[x].qualification { root = y } else { return root }
+      } else if let x = cast(root, to: Call.self) {
+        root = self[x].callee
       } else {
-        return q
+        return root
       }
     }
   }
@@ -434,7 +466,7 @@ public struct Program: Sendable {
     switch tag(of: n) {
     case AssociatedTypeDeclaration.self:
       return parent(containing: n, as: TraitDeclaration.self)
-    case BindingDeclaration.self:
+    case ConformanceDeclaration.self:
       return parent(containing: n, as: TraitDeclaration.self)
     case FunctionDeclaration.self:
       return parent(containing: n, as: TraitDeclaration.self)
@@ -443,6 +475,22 @@ public struct Program: Sendable {
     default:
       return nil
     }
+  }
+
+  /// Returns the innermost member declaration containing `s` that does not contain any type scope
+  /// containing `s`, or `nil` if no such declaration exists.
+  public func innermostMemberScope(from s: ScopeIdentity) -> ScopeIdentity? {
+    var next: Optional = s
+    while let n = next, let d = n.node {
+      if isMember(d) {
+        return n
+      } else if isStatic(d) || isTypeDeclaration(d) || isTypeExtendingDeclaration(d) {
+        return nil
+      } else {
+        next = parent(containing: n)
+      }
+    }
+    return nil
   }
 
   /// Returns a sequence containing `s` and its ancestors, from inner to outer.
@@ -460,13 +508,17 @@ public struct Program: Sendable {
     }
   }
 
-  public func compareLexicalOccurrences<T: SyntaxIdentity, U: SyntaxIdentity>(
+  /// Returns `true` iff `m` is considered to occur before `n` in diagnostics.
+  ///
+  /// If `m` and `n` are in the same scope, they are ordered by the start of their source span.
+  /// Otherwise, they are ordered by an arbitrary (but consistent and stable) order.
+  public func occurInOrder<T: SyntaxIdentity, U: SyntaxIdentity>(
     _ m: T, _ n: U
-  ) -> StrictPartialOrdering {
+  ) -> Bool {
     if parent(containing: m) == parent(containing: n) {
-      return .init(between: self[m].site.end, and: self[n].site.start)
+      return StrictOrdering(between: self[m].site.end, and: self[n].site.start) == .ascending
     } else {
-      return nil
+      return m.erased.bits < n.erased.bits
     }
   }
 
@@ -632,7 +684,12 @@ public struct Program: Sendable {
       return Name(identifier: "init", labels: .init(labels))
 
     case .simple(let x):
-      return Name(identifier: x, labels: .init(self[d].parameters.map(read(\.label?.value))))
+      let labels = self[d].parameters.map(read(\.label?.value))
+      if let (l, ls) = labels.headAndTail, l == "self" {
+        return Name(identifier: x, labels: .init(ls))
+      } else {
+        return Name(identifier: x, labels: .init(labels))
+      }
 
     case .operator(let n, let x):
       return Name(identifier: x, notation: n)
@@ -660,6 +717,16 @@ public struct Program: Sendable {
   public func name(of d: VariantDeclaration.ID) -> Name {
     let n = parent(containing: d).node.flatMap(castToDeclaration(_:)).flatMap(name(of:))!
     return .init(identifier: n.identifier, labels: n.labels, introducer: self[d].effect.value)
+  }
+
+  /// Returns the symbol associated with `n`, if any.
+  ///
+  /// A syntax tree has an associated symbol if it is annotated with `@_symbol(s)` in sources,
+  /// where `s` is a string argument.
+  public func symbol<T: SyntaxIdentity>(annotating n: T) -> String? {
+    annotations(n).first(where: { (a) in a.identifier.value == "_symbol" })
+      .flatMap({ (e) in e.arguments.uniqueElement })
+      .flatMap({ (e) in e.value.string })
   }
 
   /// If `n` is a function or subscript call, returns its callee. Otherwise, returns `nil`.
@@ -737,6 +804,24 @@ public struct Program: Sendable {
     }
   }
 
+  /// Returns the annotations applied to `n`.
+  public func annotations<T: SyntaxIdentity>(_ n: T) -> [Annotation] {
+    if let m = self[n] as? any Annotatable {
+      return m.annotations
+    } else {
+      return []
+    }
+  }
+
+  /// Returns the modifiers applied to `d`.
+  public func modifiers(_ d: DeclarationIdentity) -> [Parsed<DeclarationModifier>] {
+    if let m = self[d] as? any ModifiableDeclaration {
+      return m.modifiers
+    } else {
+      return []
+    }
+  }
+
   /// Reports that `n` was not expected in the current executation path and exits the program.
   public func unexpected<T: SyntaxIdentity>(
     _ n: T, file: StaticString = #file, line: UInt = #line
@@ -790,7 +875,11 @@ public struct Program: Sendable {
 
   /// Returns a source span suitable to emit a disgnostic related to `n` as a whole.
   public func spanForDiagnostic(about n: ConformanceDeclaration.ID) -> SourceSpan {
-    self[n].introducer.site
+    if self[n].isAdjunct {
+      return spanForDiagnostic(about: self[n].witness)
+    } else {
+      return self[n].introducer.site
+    }
   }
 
   /// Returns `message` with placeholders replaced by their corresponding values in `arguments`.
@@ -952,6 +1041,9 @@ public indirect enum SyntaxFilter {
   /// Matches any node declaring a single entity with the given name.
   case name(Name)
 
+  /// Matches any node annotated with the given symbol.
+  case symbol(String)
+
   /// Matches any node with the given tag.
   case tag(any Syntax.Type)
 
@@ -967,11 +1059,26 @@ public indirect enum SyntaxFilter {
       return l(n, in: p) && r(n, in: p)
     case .name(let x):
       return p.castToDeclaration(n).map({ (d) in p.name(of: d) == x }) ?? false
+    case .symbol(let x):
+      return p.symbol(annotating: n) == x
     case .tag(let k):
       return p.tag(of: n) == k
     case .satisfies(let p):
       return p(n)
     }
+  }
+
+}
+
+/// An syntax visitor that enumerates the immediate children of a node.
+fileprivate struct ChildrenEnumerator: SyntaxVisitor {
+
+  /// The children collected by the calls to `willEnter(_:in:)`.
+  fileprivate var children: [AnySyntaxIdentity] = []
+
+  fileprivate mutating func willEnter(_ n: AnySyntaxIdentity, in program: Program) -> Bool {
+    children.append(n)
+    return false
   }
 
 }

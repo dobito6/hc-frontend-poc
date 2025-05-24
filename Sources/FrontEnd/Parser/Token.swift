@@ -14,11 +14,13 @@ public struct Token: Hashable, Sendable {
     // Reserved keywords
     case auto
     case `case`
+    case `else`
     case `enum`
     case `extension`
     case `false`
     case fun
     case given
+    case `if`
     case `import`
     case infix
     case `init`
@@ -42,6 +44,11 @@ public struct Token: Hashable, Sendable {
     case `typealias`
     case `var`
     case `where`
+
+    // Scalar literals
+    case integerLiteral
+    case floatingPointLiteral
+    case stringLiteral
 
     // Pound keyords and literals
     case poundLiteral
@@ -77,6 +84,7 @@ public struct Token: Hashable, Sendable {
     // Errors
     case error
     case unterminatedBlockComment
+    case unterminatedStringLiteral
 
   }
 
@@ -113,7 +121,7 @@ public struct Token: Hashable, Sendable {
   /// `true` iff `self` may be at the beginning of a declaration.
   public var isDeclarationHead: Bool {
     switch tag {
-    case .case, .fun, .given, .import, .struct, .subscript, .trait, .type, .typealias:
+    case .at, .case, .fun, .given, .import, .struct, .subscript, .trait, .type, .typealias:
       return true
     default:
       return isBindingIntroducer || isDeclarationModifier
@@ -140,14 +148,19 @@ public struct Token: Hashable, Sendable {
     }
   }
 
-  /// `true` iff `self` may be part of an operator.
-  public var isOperator: Bool {
+  /// `true` iff `self` may be at the start of an operator.
+  public var isOperatorHead: Bool {
     switch tag {
-    case .ampersand, .equal, .operator, .leftAngle, .rightAngle:
+    case .ampersand, .equal, .operator, .leftAngle, .rightAngle, .star:
       return true
     default:
       return false
     }
+  }
+
+  /// `true` iff `self` may be part of an operator.
+  public var isOperatorTail: Bool {
+    isOperatorHead || (tag == .assign)
   }
 
   /// `true` iff `self` is a valid argument label.
@@ -163,6 +176,11 @@ public struct Token: Hashable, Sendable {
     default:
       return false
     }
+  }
+
+  /// Returns a lambda accepting a token and returning `true` iff that token has tag `tag`.
+  public static func hasTag(_ tag: Tag) -> (Token) -> Bool {
+    { (t) in t.tag == tag }
   }
 
 }

@@ -1,5 +1,5 @@
 {
-  "originHash" : "5c8d0169c22342d73977ada76a2c60eff08d4aeab673399ccd37faa167414677",
+  "originHash" : "ae96e398b46d533cc2c9f025a4306329ed75ee79b6ab8764d46580fe11ba7ba9",
   "pins" : [
     {
       "identity" : "archivist",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/kyouko-taiga/more-swift-collections.git",
       "state" : {
-        "revision" : "11a51fcd0cbedc34bc28d78d7caec5fef04aaf52",
-        "version" : "0.6.0"
+        "revision" : "7be77f51e1a1a59da41876a2d10fc0aebb4b5234",
+        "version" : "0.6.1"
       }
     },
     {
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-algorithms.git",
       "state" : {
-        "revision" : "f6919dfc309e7f1b56224378b11e28bab5bccc42",
-        "version" : "1.2.0"
+        "revision" : "87e50f483c54e6efd60e885f7f5aa946cee68023",
+        "version" : "1.2.1"
       }
     },
     {
@@ -42,8 +42,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-collections.git",
       "state" : {
-        "revision" : "94cf62b3ba8d4bed62680a282d4c25f9c63c2efb",
-        "version" : "1.1.0"
+        "revision" : "671108c96644956dddcd89dd59c203dcdb36cec7",
+        "version" : "1.1.4"
       }
     },
     {
@@ -51,8 +51,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-numerics.git",
       "state" : {
-        "revision" : "0a5bc04095a675662cf24757cc0640aa2204253b",
-        "version" : "1.0.2"
+        "revision" : "e0ec0f5f3af6f3e4d5e7a19d2af26b481acb6ba8",
+        "version" : "1.0.3"
       }
     },
     {
