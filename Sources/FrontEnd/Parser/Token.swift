@@ -69,6 +69,7 @@ public struct Token: Hashable, Sendable {
     case colon
     case doubleColon
     case semicolon
+    case ellipsis
     case at
 
     // Delimiters
@@ -193,7 +194,7 @@ extension Token: Archivable {
     let s = try archive.read(SourceSpan.self, in: &context)
     self.init(tag: k, site: s)
   }
-  
+
   public func write<T>(to archive: inout WriteableArchive<T>, in context: inout Any) throws {
     try archive.write(rawValueOf: tag, in: &context)
     try archive.write(site, in: &context)

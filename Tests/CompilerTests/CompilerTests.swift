@@ -5,6 +5,11 @@ import StandardLibrary
 import Utilities
 import XCTest
 
+/// The driver for generated compiler tests.
+///
+/// This class is used as a driver to run the negative and positive tests. Its test cases are meant
+/// to be defined in an extension that is generated either automatically as part of the build or by
+/// manually invoking `hc-tests`.
 final class CompilerTests: XCTestCase {
 
   /// The input of a compiler test.
@@ -30,7 +35,7 @@ final class CompilerTests: XCTestCase {
 
       if root.pathExtension == "package" {
         self.manifest = (try? Self.manifest(root)) ?? .init(options: [])
-      } else if let s = try? String(contentsOf: root).firstLine, s.starts(with: "//!") {
+      } else if let s = Self.firstLine(of: root), s.starts(with: "//!") {
         self.manifest = .init(options: s.split(separator: " ").dropFirst().map(String.init(_:)))
       } else {
         self.manifest = .init(options: [])
@@ -69,12 +74,20 @@ final class CompilerTests: XCTestCase {
       }
 
       // Try to read the manifest's properties from the first line.
-      else if let s = try? String(contentsOf: root).firstLine, s.starts(with: "//!") {
+      else if let s = firstLine(of: root), s.starts(with: "//!") {
         return .init(options: s.split(separator: " ").dropFirst().map(String.init(_:)))
       }
 
       // Return a default manifest.
-      else { return .init(options: []) }
+      else {
+        return .init(options: [])
+      }
+    }
+
+    /// Returns the first line of the file at `url`, which is encoded in UTF-8, or `nil`if that
+    /// this file could not be read.
+    private static func firstLine(of url: URL) -> Substring? {
+      (try? String(contentsOf: url, encoding: .utf8))?.firstLine
     }
 
   }
@@ -83,7 +96,7 @@ final class CompilerTests: XCTestCase {
   ///
   /// An new directory is generated every time this property is initialized and removed once all
   /// tests have run.
-  private static let moduleCachePath: (url: URL, delete: @Sendable () -> ()) = {
+  private static let moduleCachePath: (url: URL, delete: @Sendable () -> Void) = {
     let m = FileManager.default
     let u = try! m.url(
       for: .itemReplacementDirectory,
@@ -157,18 +170,28 @@ final class CompilerTests: XCTestCase {
     let observations: [FileName: [Diagnostic]] = .init(
       grouping: diagnostics, by: \.site.source.name)
 
+    var report = ""
     for (n, e) in expectations {
       var o = ""
       for d in observations[n, default: []].sorted() {
         d.render(into: &o, showingPaths: .relative(to: root), style: .unstyled)
       }
 
-      if o != e {
-        XCTFail("output does not match expected result")
+      let lhs = e.split(whereSeparator: \.isNewline)
+      let rhs = o.split(whereSeparator: \.isNewline)
+      let delta = lhs.difference(from: rhs).inferringMoves()
+
+      if !delta.isEmpty {
+        report.write(Self.explain(difference: delta, relativeTo: lhs, named: n))
+
         guard case .local(let u) = n else { continue }
         let v = u.deletingPathExtension().appendingPathExtension("observed")
         try? o.write(to: v, atomically: true, encoding: .utf8)
       }
+    }
+
+    if !report.isEmpty {
+      XCTFail("observed output does match expecation:" + report)
     }
   }
 
@@ -191,6 +214,38 @@ final class CompilerTests: XCTestCase {
         try? o.write(to: v, atomically: true, encoding: .utf8)
       }
     }
+  }
+
+  /// Returns a message explaining `delta`, which is the result of comparing `expectation` to some
+  /// observed result.
+  private static func explain(
+    difference delta: CollectionDifference<String.SubSequence>,
+    relativeTo expectation: [Substring], named name: FileName
+  ) -> String {
+    var patch: [[(Character, Substring)]] = []
+
+    for change in delta {
+      switch change {
+      case .insert(let i, let line, _):
+        while patch.count <= i { patch.append([]) }
+        patch[i].append(("+", line))
+      case .remove(let i, let line, _):
+        while patch.count <= i { patch.append([]) }
+        patch[i].append(("-", line))
+      }
+    }
+
+    var report = "\n> \(name)"
+
+    for i in patch.indices {
+      if patch[i].isEmpty && (i < expectation.count) {
+        report.write("\n \(expectation[i])")
+      } else {
+        for (m, line) in patch[i] { report.write("\n\(m)\(line)") }
+      }
+    }
+
+    return report
   }
 
 }

@@ -306,7 +306,7 @@ public struct Parser {
   ) throws -> EnumDeclaration.ID {
     let introducer = try take(.enum) ?? expected("'enum'")
     let identifier = parseSimpleIdentifier()
-    let parameters = try parseOptionalCompileTimeParameters(in: &file)
+    let parameters = try parseOptionalContextClause(in: &file)
     let representation = try next(is: .leftParenthesis) ? parseExpression(in: &file) : nil
     let conformances = try parseOptionalAdjunctConformanceList(until: .leftBrace, in: &file)
     let members = try parseTypeBody(in: &file, accepting: \.isValidEnumMember)
@@ -334,7 +334,7 @@ public struct Parser {
     after prologue: DeclarationPrologue, in file: inout Module.SourceContainer
   ) throws -> ExtensionDeclaration.ID {
     let introducer = try take(.extension) ?? expected("'extension'")
-    var parameters = try parseOptionalCompileTimeParameters(in: &file)
+    var parameters = try parseOptionalContextClause(in: &file)
     let extendee = try parseExpression(in: &file)
 
     // Are we parsing a trait extension?
@@ -398,7 +398,7 @@ public struct Parser {
 
     // Expect a conformance declaration.
     else {
-      let parameters = try parseOptionalCompileTimeParameters(in: &file)
+      let parameters = try parseOptionalContextClause(in: &file)
       let conformer = try parseExpression(in: &file)
       _ = try take(contextual: "is") ?? expected("'is'")
       let concept = try parseExpression(in: &file)
@@ -439,7 +439,8 @@ public struct Parser {
   ) throws -> DeclarationIdentity {
     let introducer = try take(.fun) ?? expected("'fun'")
     let identifier = try parseFunctionIdentifier()
-    let parameters = try parseParameterClauses(in: &file)
+    let captures = try parseOptionalCaptureList(in: &file) ?? .empty(at: position)
+    let (contextParameters, parameters) = try parseParameterClauses(in: &file)
     let effect = parseOptionalAccessEffect() ?? .init(.let, at: .empty(at: position))
 
     // Insert the self-parameter of non-static member declarations.
@@ -447,10 +448,10 @@ public struct Parser {
     var p: [ParameterDeclaration.ID] = []
     if (context == .typeBody) && !prologue.contains(.static) {
       isMember = true
-      p = [synthesizeSelfParameter(effect: effect, in: &file)] + parameters.1
+      p = [synthesizeSelfParameter(effect: effect, in: &file)] + parameters
     } else {
       isMember = false
-      p = parameters.1
+      p = parameters
     }
 
     let output = try parseOptionalReturnTypeAscription(in: &file)
@@ -465,7 +466,8 @@ public struct Parser {
           modifiers: prologue.modifiers,
           introducer: .init(introducer, at: introducer.site),
           identifier: i,
-          staticParameters: parameters.0,
+          staticParameters: contextParameters,
+          captures: captures,
           parameters: p,
           effect: effect,
           output: output,
@@ -484,7 +486,8 @@ public struct Parser {
           modifiers: prologue.modifiers,
           introducer: f,
           identifier: identifier,
-          staticParameters: parameters.0,
+          staticParameters: contextParameters,
+          captures: captures,
           parameters: p,
           effect: isMember ? .init(.let, at: effect.site) : effect,
           output: output,
@@ -508,7 +511,7 @@ public struct Parser {
 
     // Are we parsing a custom initializer?
     if introducer.value == .`init` {
-      let parameters = try parseParameterClauses(in: &file)
+      let (contextParameters, parameters) = try parseParameterClauses(in: &file)
       let b = try parseOptionalCallableBody(in: &file)
 
       return file.insert(
@@ -517,8 +520,9 @@ public struct Parser {
           modifiers: sanitize(prologue.modifiers, accepting: \.isApplicableToInitializer),
           introducer: introducer,
           identifier: .init(.simple("init"), at: introducer.site),
-          staticParameters: parameters.0,
-          parameters: [receiver] + parameters.1,
+          staticParameters: contextParameters,
+          captures: .empty(at: introducer.site.end),
+          parameters: [receiver] + parameters,
           effect: .init(.let, at: introducer.site),
           output: nil,
           body: b,
@@ -534,6 +538,7 @@ public struct Parser {
           introducer: introducer,
           identifier: .init(.simple("init"), at: introducer.site),
           staticParameters: .empty(at: .empty(at: position)),
+          captures: .empty(at: introducer.site.end),
           parameters: [receiver],
           effect: .init(.let, at: introducer.site),
           output: nil,
@@ -565,25 +570,24 @@ public struct Parser {
   /// Parses the parameter clauses of a callable declaration.
   ///
   ///     parameter-clauses ::=
-  ///       compile-time-parameters? run-time-parameters
+  ///       context-clause? parameter-list
   ///
   private mutating func parseParameterClauses(
     in file: inout Module.SourceContainer
-  ) throws -> (StaticParameters, [ParameterDeclaration.ID]) {
-    let s = try parseOptionalCompileTimeParameters(in: &file)
+  ) throws -> (ContextParameters, [ParameterDeclaration.ID]) {
+    let s = try parseOptionalContextClause(in: &file)
     let r = try parseParenthesizedParameterList(in: &file)
     return (s, r)
   }
 
-  /// Parses a compile-time parameter list iff the next token is a left angle bracket. Otherwise,
-  /// returns an empty list.
+  /// Parses a context clause iff the next token is a left angle bracket.
   ///
-  ///     compile-time-parameters ::=
+  ///     context-clause ::=
   ///       '<' generic-parameters where-clause? '>'
   ///
-  private mutating func parseOptionalCompileTimeParameters(
+  private mutating func parseOptionalContextClause(
     in file: inout Module.SourceContainer
-  ) throws -> StaticParameters {
+  ) throws -> ContextParameters {
     if !next(is: .leftAngle) { return .empty(at: .empty(at: position)) }
     let start = nextTokenStart()
 
@@ -601,7 +605,7 @@ public struct Parser {
 
       // Parse other usings.
       try usings.append(contentsOf: me.parseOptionalWhereClause(in: &file))
-      return StaticParameters(explicit: types, implicit: usings, site: me.span(from: start))
+      return ContextParameters(explicit: types, implicit: usings, site: me.span(from: start))
     }
   }
 
@@ -651,6 +655,39 @@ public struct Parser {
     let lhs = ExpressionIdentity(file.insert(NameExpression(.init(conformer))))
     let witness = ExpressionIdentity(desugaredConformance(of: lhs, to: rhs, in: &file))
     return file.insert(UsingDeclaration(witness: witness, site: file[rhs].site))
+  }
+
+  /// Parses a capture list.
+  ///
+  ///     capture-list ::=
+  ///       '[' binding-declaration (',' binding-declaration)* (',' '...'?)? ']'
+  ///
+  private mutating func parseOptionalCaptureList(
+    in file: inout Module.SourceContainer
+  ) throws -> CaptureList? {
+    if !next(is: .leftBracket) { return nil }
+
+    return try inBrackets { (m0) in
+      // Are we parsing `[...]`?
+      if let t = m0.take(.ellipsis) {
+        return .init(explicit: [], allowsInferredCaptures: true, site: t.site)
+      }
+
+      // Parse a comma-separated list of binding declarations.
+      let s = m0.position
+      let (ds, lastComma) = try m0.commaSeparated(until: Token.hasTag(.rightBracket)) { (m1) in
+        try m1.parseBindingDeclaration(after: .none(), in: &file)
+      }
+
+      // Is there a trailing ellipsis?
+      if let t = m0.take(.ellipsis) {
+        if lastComma == nil { m0.report(m0.expected("','", at: .empty(at: t.site.start))) }
+        return .init(explicit: ds, allowsInferredCaptures: true, site: .empty(at: s))
+      } else {
+        return .init(explicit: ds, allowsInferredCaptures: false, site: .empty(at: s))
+      }
+
+    }
   }
 
   /// Parses a list of adjunct conformance declarations iff the next token is `.is`.
@@ -745,7 +782,7 @@ public struct Parser {
     return .init(d)
   }
 
-  /// Parses a comma-separated listof parameter declarations.
+  /// Parses a comma-separated list of parameter declarations.
   private mutating func parseParenthesizedParameterList(
     in file: inout Module.SourceContainer
   ) throws -> [ParameterDeclaration.ID] {
@@ -804,10 +841,33 @@ public struct Parser {
     in file: inout Module.SourceContainer
   ) throws -> [StatementIdentity]? {
     if next(is: .leftBrace) {
-      return try entering(.default, { (me) in try me.parseBracedStatementList(in: &file) })
+      return try parseCallableBody(in: &file)
     } else {
       return nil
     }
+  }
+
+  /// Parses the body of a callable abstraction.
+  ///
+  /// The body is parsed as a sequence of statements enclosed in braces. If the sequence is empty,
+  /// the result is a list containing one return statement having no return value. If the sequence
+  /// contains a single expression, the result is a list containing one return statement having
+  /// that expression as a return value. Otherwise, the result contains the parsed statements.
+  private mutating func parseCallableBody(
+    in file: inout Module.SourceContainer
+  ) throws -> [StatementIdentity] {
+    var ss = try entering(.default, { (me) in try me.parseBracedStatementList(in: &file) })
+
+    if ss.isEmpty {
+      let r = file.insert(Return(introducer: nil, value: nil, site: .empty(at: position)))
+      ss.append(.init(r))
+    } else if let s = ss.uniqueElement, file.tag(of: s).value is any Expression.Type {
+      let e = ExpressionIdentity(uncheckedFrom: s.erased)
+      let r = file.insert(Return(introducer: nil, value: e, site: file[s].site))
+      ss[0] = .init(r)
+    }
+
+    return ss
   }
 
   private mutating func parseBundleBody(
@@ -848,7 +908,7 @@ public struct Parser {
   ) throws -> StructDeclaration.ID {
     let introducer = try take(.struct) ?? expected("'struct'")
     let identifier = parseSimpleIdentifier()
-    let parameters = try parseOptionalCompileTimeParameters(in: &file)
+    let parameters = try parseOptionalContextClause(in: &file)
     let conformances = try parseOptionalAdjunctConformanceList(until: .leftBrace, in: &file)
     let members = try parseTypeBody(in: &file, accepting: \.isValidStructMember)
 
@@ -874,7 +934,7 @@ public struct Parser {
   ) throws -> TraitDeclaration.ID {
     let introducer = try take(.trait) ?? expected("'trait'")
     let identifier = parseSimpleIdentifier()
-    let parameters = try parseOptionalCompileTimeParameters(in: &file)
+    let parameters = try parseOptionalContextClause(in: &file)
 
     // Base traits are desugared as given requirements before other members.
     var members = try parseOptionalRefinementList(of: identifier.value,  in: &file)
@@ -1127,17 +1187,17 @@ public struct Parser {
   ) throws -> ExpressionIdentity {
     var h = head
     while true {
-      // The period separating nominal components binds more tightly than mutation markers.
+      // Qualifications and bracketed calls bind more tightly than mutation markers.
       if let n = try appendNominalComponent(to: h, in: &file) {
+        h = n
+      } else if let n = try appendBracketedArguments(to: h, in: &file) {
         h = n
       } else if let m = marker.take() {
         h = .init(file.insert(InoutExpression(marker: m, lvalue: h, site: span(from: m))))
       } else if let n = try appendParenthesizedArguments(to: h, in: &file) {
         h = n
-      } else if let n = try appendBracketedArguments(to: h, in: &file) {
-        h = n; continue
       } else if let n = try appendAngledArguments(to: h, in: &file) {
-        h = n; continue
+        h = n
       } else {
         break
       }
@@ -1247,6 +1307,8 @@ public struct Parser {
       return try .init(parseIf(in: &file))
     case .match:
       return try .init(parsePatternMatch(in: &file))
+    case .fun:
+      return try .init(parseLambda(in: &file))
     case .name:
       return try .init(parseUnqualifiedNameExpression(in: &file))
     case .auto, .inout, .let, .set, .sink:
@@ -1305,19 +1367,38 @@ public struct Parser {
     let label: Parsed<String>?
     let ascription: ExpressionIdentity
 
-    // If the next token is a name or a keyword, attempt to parse a label, reinterpreting it as an
-    // expression if it isn't followed by `:`. Otherwise, parse an expression.
-    if let n = take(if: { (t) in (t.tag == .name) || t.isKeyword }) {
+    // If the next token is an access effect, it is either a label and then following token is a
+    // colon, or it is the effect of a remote type expression.
+    if let k = parseOptionalAccessEffect() {
       if take(.colon) != nil {
-        label = Parsed(n)
+        label = Parsed(String(k.site.text), at: k.site)
         ascription = try parseExpression(in: &file)
       } else {
-        if n.isKeyword { report(.init("'\(n.text)' is not a valid identifier", at: n.site)) }
+        let e = try parseExpression(in: &file)
+        let a = file.insert(
+          RemoteTypeExpression(access: k, projectee: e, site: span(from: k.site.start)))
         label = nil
-        ascription = .init(
-          file.insert(NameExpression(Parsed(Name(identifier: String(n.text)), at: n.site))))
+        ascription = .init(a)
       }
-    } else {
+    }
+
+    // If the next token is a name or keyword, it is either a label and then following token is a
+    // colon, or it is part of an expression.
+    else if let n = take(if: \.isArgumentLabel) {
+      if take(.colon) != nil {
+        label = n.tag == .underscore ? nil : Parsed(n)
+        ascription = try parseExpression(in: &file)
+      } else if n.tag == .name {
+        let identifier = Name(identifier: String(n.text))
+        label = nil
+        ascription = .init(file.insert(NameExpression(Parsed(identifier, at: n.site))))
+      } else {
+        throw ParseError("'\(n.text)' is not a valid identifier", at: n.site)
+      }
+    }
+
+    // Otherwise, just parse a type expression.
+    else {
       label = nil
       ascription = try parseExpression(in: &file)
     }
@@ -1434,6 +1515,34 @@ public struct Parser {
 
     return file.insert(
       PatternMatchCase(introducer: i, pattern: p, body: b, site: span(from: i)))
+  }
+
+  /// Parses a lambda.
+  ///
+  ///     lambda ::=
+  ///       'fun' lambda-captures parameter-list ('->' expression)? callable-body
+  ///
+  private mutating func parseLambda(in file: inout Module.SourceContainer) throws -> Lambda.ID {
+    let introducer = try take(.fun) ?? expected("'fun'")
+    let captures = try parseOptionalCaptureList(in: &file) ?? .inferred(at: position)
+    let parameters = try parseParenthesizedParameterList(in: &file)
+    let effect = parseOptionalAccessEffect() ?? .init(.let, at: .empty(at: position))
+    let output = try parseOptionalReturnTypeAscription(in: &file)
+    let body = try parseCallableBody(in: &file)
+
+    let f = file.insert(
+      FunctionDeclaration(
+        annotations: [],
+        modifiers: [],
+        introducer: .init(.fun, at: introducer.site),
+        identifier: .init(.lambda, at: introducer.site),
+        staticParameters: .empty(at: .empty(at: introducer.site.end)),
+        captures: captures,
+        parameters: parameters,
+        effect: effect,
+        output: output, body: body,
+        site: span(from: introducer)))
+    return file.insert(Lambda(function: f, site: span(from: introducer)))
   }
 
   /// Parses a remote type expression.

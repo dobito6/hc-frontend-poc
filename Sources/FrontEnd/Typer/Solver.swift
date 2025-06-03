@@ -170,6 +170,7 @@ internal struct Solver {
       return postpone(g)
     }
 
+    // Summon a coercion.
     let es = typer.coerced(k.origin, withType: k.lhs, toMatch: k.rhs)
 
     // Coercion succeeded?
@@ -183,7 +184,7 @@ internal struct Solver {
       return .success
     }
 
-    // Coercion failed but it may succeeded with more context?
+    // Coercion failed but it may succeed with more context?
     else if k.rhs[.hasVariable] {
       return postpone(g)
     }
@@ -333,7 +334,7 @@ internal struct Solver {
     }
 
     // Infer the output type.
-    let m = inplace || program.isMarkedMutating(program[k.origin].callee)
+    let m = inplace || program.isMarkedForMutation(program[k.origin].callee)
     if let o = program.types.resultOfApplying(callee, mutably: m) {
       subgoals.append(schedule(EqualityConstraint(lhs: o, rhs: k.output, site: k.site)))
     } else {
@@ -391,7 +392,7 @@ internal struct Solver {
         i += 1
 
         // Is the argument mutating an `auto` parameter?
-        if (p.access == .auto) && program.isMarkedMutating(v) { inplace = true }
+        if (p.access == .auto) && program.isMarkedForMutation(v) { inplace = true }
       }
 
       // The parameter has a default value?
